@@ -1,0 +1,42 @@
+{
+  "source": "D:/IDAPro9.3/plugins/diaphora",
+  "sequence_matcher_quick_ratio": [
+    {
+      "left": "a\nb\nc",
+      "right": "a\nx\nc",
+      "expected": 0.6666666666666666
+    },
+    {
+      "left": "a\nb",
+      "right": "b\na",
+      "expected": 1.0
+    },
+    {
+      "left": "a\nb\nb",
+      "right": "b\nb\nc",
+      "expected": 0.6666666666666666
+    }
+  ],
+  "ast_prime_difference_ratio": [
+    {
+      "left": "30",
+      "right": "42",
+      "expected": 0.33333333333333337
+    },
+    {
+      "left": "30",
+      "right": "30",
+      "expected": 1.0
+    },
+    {
+      "left": "2310",
+      "right": "2730",
+      "expected": 0.6
+    },
+    {
+      "left": "30030",
+      "right": "39270",
+      "expected": 0.6666666666666667
+    }
+  ]
+}

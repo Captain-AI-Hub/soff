@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "description": "SOFF M10 parity test manifest",
+  "samples": [
+    {
+      "name": "soff_pair",
+      "main_db": "../../../test/soff_pair_a.sqlite",
+      "diff_db": "../../../test/soff_pair_b.sqlite",
+      "python_baseline": {
+        "best": 33,
+        "partial": 5,
+        "unreliable": 0,
+        "multimatch": 0,
+        "unmatched_primary": 57,
+        "unmatched_secondary": 57
+      },
+      "options": {
+        "unreliable": true,
+        "max_rows": 200000,
+        "timeout": 120
+      }
+    }
+  ]
+}

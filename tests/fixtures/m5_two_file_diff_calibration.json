@@ -1,0 +1,146 @@
+{
+  "main_db": "G:\\DM\\diaphora-cpp\\test\\soff_pair_a.sqlite",
+  "diff_db": "G:\\DM\\diaphora-cpp\\test\\soff_pair_b.sqlite",
+  "result_db": "G:\\DM\\diaphora-cpp\\soff\\build\\windows\\x64\\release\\build\\soff_pair_ab.diaphora",
+  "source_pair": {
+    "primary_source": "G:\\DM\\diaphora-cpp\\test\\soff_pair_a.c",
+    "secondary_source": "G:\\DM\\diaphora-cpp\\test\\soff_pair_b.c",
+    "primary_binary": "G:\\DM\\diaphora-cpp\\test\\soff_pair_a.exe",
+    "secondary_binary": "G:\\DM\\diaphora-cpp\\test\\soff_pair_b.exe",
+    "compiler": "clang -O1 -g -fno-inline -fno-omit-frame-pointer -Wl,--no-insert-timestamp"
+  },
+  "exports": {
+    "primary": {
+      "total_functions": 96,
+      "exported_functions": 52,
+      "skipped_functions": 44,
+      "program_data": 21,
+      "crash_resume_supported": false,
+      "last_function_index": 95,
+      "last_function_name": "strncmp",
+      "skip_reasons": {"thunk": 44},
+      "instructions": 1797,
+      "basic_blocks": 418,
+      "bb_relations": 574,
+      "bb_instructions": 1797,
+      "function_bblocks": 418,
+      "callgraph": 139,
+      "constants": 215,
+      "field_fill": {
+        "functions": 52,
+        "names_nonempty": 43,
+        "assembly": 52,
+        "clean_assembly": 52,
+        "assembly_addrs": 52,
+        "bytes_sum": 52,
+        "function_flags": 52,
+        "mangled_function": 52,
+        "prototype": 50,
+        "prototype2": 50,
+        "comment": 3,
+        "md_index_nonzero": 33,
+        "indegree_nonzero": 31,
+        "outdegree_nonzero": 27
+      }
+    },
+    "secondary": {
+      "total_functions": 96,
+      "exported_functions": 52,
+      "skipped_functions": 44,
+      "program_data": 21,
+      "crash_resume_supported": false,
+      "last_function_index": 95,
+      "last_function_name": "strncmp",
+      "skip_reasons": {"thunk": 44},
+      "instructions": 1815,
+      "basic_blocks": 423,
+      "bb_relations": 581,
+      "bb_instructions": 1815,
+      "function_bblocks": 423,
+      "callgraph": 139,
+      "constants": 220,
+      "field_fill": {
+        "functions": 52,
+        "names_nonempty": 44,
+        "assembly": 52,
+        "clean_assembly": 52,
+        "assembly_addrs": 52,
+        "bytes_sum": 52,
+        "function_flags": 52,
+        "mangled_function": 52,
+        "prototype": 50,
+        "prototype2": 50,
+        "comment": 3,
+        "md_index_nonzero": 34,
+        "indegree_nonzero": 31,
+        "outdegree_nonzero": 27
+      }
+    }
+  },
+  "diff_summary": {
+    "heuristics": 50,
+    "same_processor": true,
+    "candidates": 1397,
+    "accepted": 38,
+    "multimatches": 3,
+    "best": 33,
+    "partial": 5,
+    "unreliable": 0,
+    "result_multimatch": 3,
+    "unmatched_primary": 14,
+    "unmatched_secondary": 14,
+    "row_limited": 0,
+    "timed_out": 0,
+    "cancelled": 0
+  },
+  "nonzero_heuristics": [
+    {"name": "Same order and hash", "candidates": 9, "accepted": 9, "rejected": 0, "skipped": 0, "multimatches": 0},
+    {"name": "Function Hash", "candidates": 9, "accepted": 0, "rejected": 0, "skipped": 9, "multimatches": 0},
+    {"name": "Bytes hash", "candidates": 9, "accepted": 0, "rejected": 0, "skipped": 9, "multimatches": 0},
+    {"name": "Same address and mnemonics", "candidates": 4, "accepted": 4, "rejected": 0, "skipped": 0, "multimatches": 0},
+    {"name": "Same cleaned assembly", "candidates": 25, "accepted": 19, "rejected": 0, "skipped": 6, "multimatches": 0},
+    {"name": "Same address, nodes, edges and mnemonics", "candidates": 4, "accepted": 0, "rejected": 0, "skipped": 4, "multimatches": 0},
+    {"name": "Same RVA", "candidates": 6, "accepted": 1, "rejected": 1, "skipped": 4, "multimatches": 0},
+    {"name": "Equal assembly or pseudo-code", "candidates": 9, "accepted": 2, "rejected": 0, "skipped": 7, "multimatches": 0},
+    {"name": "Same constants", "candidates": 35, "accepted": 0, "rejected": 6, "skipped": 29, "multimatches": 0},
+    {"name": "Same rare MD Index", "candidates": 14, "accepted": 0, "rejected": 0, "skipped": 14, "multimatches": 0},
+    {"name": "Same address and rare constant", "candidates": 9, "accepted": 2, "rejected": 2, "skipped": 5, "multimatches": 0},
+    {"name": "Same rare constant", "candidates": 1229, "accepted": 1, "rejected": 502, "skipped": 723, "multimatches": 3},
+    {"name": "Same MD Index and constants", "candidates": 26, "accepted": 0, "rejected": 0, "skipped": 26, "multimatches": 0},
+    {"name": "Import names hash", "candidates": 1, "accepted": 0, "rejected": 0, "skipped": 1, "multimatches": 0},
+    {"name": "Mnemonics and names", "candidates": 8, "accepted": 0, "rejected": 0, "skipped": 8, "multimatches": 0}
+  ],
+  "application_matches": {
+    "best": [
+      {"primary_name": "stable_mix", "secondary_name": "stable_mix", "ratio": 1.0, "description": "Same order and hash"}
+    ],
+    "partial": [
+      {"primary_name": "main", "secondary_name": "main", "ratio": 0.99, "description": "Same address and mnemonics"},
+      {"primary_name": "inventory_total", "secondary_name": "inventory_total", "ratio": 0.99, "description": "Same RVA"},
+      {"primary_name": "item_init", "secondary_name": "item_init", "ratio": 0.745418, "description": "Same address and rare constant"},
+      {"primary_name": "recursive_checksum", "secondary_name": "recursive_checksum", "ratio": 0.740647, "description": "Same rare constant"},
+      {"primary_name": "branchy_dispatch", "secondary_name": "branchy_dispatch", "ratio": 0.62017, "description": "Same address and rare constant"}
+    ],
+    "expected_unmatched_primary": [
+      "removed_only_in_a",
+      "item_score",
+      "clamp_score"
+    ],
+    "expected_unmatched_secondary": [
+      "added_only_in_b",
+      "item_score",
+      "clamp_score_v2"
+    ]
+  },
+  "multimatches": [
+    {"primary_name": "recursive_checksum", "secondary_name": "inventory_total", "ratio": 0.35275, "description": "Same rare constant"},
+    {"primary_name": "inventory_total", "secondary_name": "recursive_checksum", "ratio": 0.304082, "description": "Same rare constant"},
+    {"primary_name": "main", "secondary_name": "recursive_checksum", "ratio": 0.215897, "description": "Same rare constant"}
+  ],
+  "notes": [
+    "This fixture is the first real two-export M5 diff baseline; it replaces self-diff as the primary behavioral calibration for changed binaries.",
+    "Runtime/CRT functions dominate best matches because both samples share the same compiler/runtime skeleton.",
+    "The intended application changes appear as partial matches and expected unmatched functions.",
+    "Import names hash now produces one candidate but it is skipped because the pair is already covered by stronger prior heuristics."
+  ]
+}

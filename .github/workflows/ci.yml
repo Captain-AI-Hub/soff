@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Install SQLite (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0
+
+      - name: Install SQLite (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sqlite3
+
+      - name: Install SQLite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://www.sqlite.org/2024/sqlite-dll-win-x64-3470200.zip"
+          Invoke-WebRequest -Uri $url -OutFile sqlite.zip
+          Expand-Archive sqlite.zip -DestinationPath sqlite
+          Copy-Item sqlite\sqlite3.dll -Destination C:\Windows\System32\
+
+      - name: Configure
+        run: xmake config --ida_plugin=y -y
+
+      - name: Install dependencies
+        run: xmake require -y
+
+      - name: Build
+        run: xmake build -y
+
+      - name: Test
+        run: xmake run soff_smoke

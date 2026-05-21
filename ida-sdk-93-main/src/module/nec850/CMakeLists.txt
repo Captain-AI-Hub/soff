@@ -1,0 +1,21 @@
+# Processor Module: nec850
+ida_add_procmod(nec850
+    SOURCES
+        ana.cpp
+        cfh.cpp
+        emu.cpp
+        ins.cpp
+        merge.cpp
+        out.cpp
+        reg.cpp
+        regfinder.cpp
+        ../idaidp.hpp
+        ins.hpp
+        tinfo.cpp
+        emu_frame.cpp
+        switch.cpp
+        ../spcfuncs.hpp
+        spcfuncs.cpp
+        notify_codes.hpp
+        necv850.hpp
+)

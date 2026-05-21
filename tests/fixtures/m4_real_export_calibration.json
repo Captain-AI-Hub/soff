@@ -1,0 +1,81 @@
+{
+  "name": "m4_real_export_self_diff_baseline",
+  "date": "2026-05-20",
+  "ida_mcp": {
+    "input_file": "G:/DM/Sarma/ide/resources/ida_mcp/test/samples/complex.exe",
+    "arch": "x86_64",
+    "bits": 64,
+    "endian": "little",
+    "sha256": "fe2339079842e770abb41ec8f5f1b7b9018abd3d2044df88542430838934c556",
+    "function_count": 113
+  },
+  "export_db": {
+    "path": "G:/DM/diaphora-cpp/test/1.sqlite",
+    "arch": "metapc",
+    "functions": 113,
+    "instructions": 2381,
+    "basic_blocks": 538,
+    "bb_relations": 654,
+    "bb_instructions": 2381,
+    "function_bblocks": 538,
+    "callgraph": 162,
+    "constants": 267
+  },
+  "self_diff": {
+    "command": "xmake run soff_cli diff-db G:/DM/diaphora-cpp/test/1.sqlite G:/DM/diaphora-cpp/test/1.sqlite --out G:/DM/diaphora-cpp/test/1_self.diaphora --unreliable --max-rows 200000 --timeout 120",
+    "result_db": "G:/DM/diaphora-cpp/test/1_self.diaphora",
+    "result_tables": 4,
+    "result_indexes": 1,
+    "heuristics": 50,
+    "heuristic_stats_persisted": true,
+    "heuristic_stats_rows": 50,
+    "same_processor": true,
+    "candidates": 2667,
+    "accepted": 56,
+    "multimatches": 0,
+    "best": 56,
+    "partial": 0,
+    "unreliable": 0,
+    "result_multimatch": 0,
+    "unmatched_primary": 57,
+    "unmatched_secondary": 57,
+    "row_limited": 0,
+    "timed_out": 0,
+    "cancelled": 0,
+    "description_counts": {
+      "Same RVA and hash": 41,
+      "Same order and hash": 12,
+      "Bytes hash": 3
+    }
+  },
+  "top_matches": [
+    {"line": 0, "type": "best", "primary": 5368713216, "primary_name": "WinMainCRTStartup", "secondary": 5368713216, "secondary_name": "WinMainCRTStartup", "ratio": 1.0, "nodes1": 34, "nodes2": 34, "description": "Same RVA and hash"},
+    {"line": 1, "type": "best", "primary": 5368713248, "primary_name": "__tmainCRTStartup", "secondary": 5368713248, "secondary_name": "__tmainCRTStartup", "ratio": 1.0, "nodes1": 44, "nodes2": 44, "description": "Same RVA and hash"},
+    {"line": 2, "type": "best", "primary": 5368714192, "primary_name": "mainCRTStartup", "secondary": 5368714192, "secondary_name": "mainCRTStartup", "ratio": 1.0, "nodes1": 34, "nodes2": 34, "description": "Same RVA and hash"},
+    {"line": 3, "type": "best", "primary": 5368714272, "primary_name": "ida_mcp_point_make", "secondary": 5368714272, "secondary_name": "ida_mcp_point_make", "ratio": 1.0, "nodes1": 1, "nodes2": 1, "description": "Same order and hash"},
+    {"line": 4, "type": "best", "primary": 5368714320, "primary_name": "ida_mcp_point_distance_squared", "secondary": 5368714320, "secondary_name": "ida_mcp_point_distance_squared", "ratio": 1.0, "nodes1": 1, "nodes2": 1, "description": "Same order and hash"},
+    {"line": 5, "type": "best", "primary": 5368714400, "primary_name": "ida_mcp_rect_init", "secondary": 5368714400, "secondary_name": "ida_mcp_rect_init", "ratio": 1.0, "nodes1": 8, "nodes2": 8, "description": "Same RVA and hash"},
+    {"line": 6, "type": "best", "primary": 5368714624, "primary_name": "ida_mcp_rect_width", "secondary": 5368714624, "secondary_name": "ida_mcp_rect_width", "ratio": 1.0, "nodes1": 1, "nodes2": 1, "description": "Same order and hash"},
+    {"line": 7, "type": "best", "primary": 5368714656, "primary_name": "ida_mcp_rect_height", "secondary": 5368714656, "secondary_name": "ida_mcp_rect_height", "ratio": 1.0, "nodes1": 1, "nodes2": 1, "description": "Same order and hash"},
+    {"line": 8, "type": "best", "primary": 5368714688, "primary_name": "ida_mcp_rect_area", "secondary": 5368714688, "secondary_name": "ida_mcp_rect_area", "ratio": 1.0, "nodes1": 1, "nodes2": 1, "description": "Same order and hash"},
+    {"line": 9, "type": "best", "primary": 5368714752, "primary_name": "ida_mcp_rect_contains", "secondary": 5368714752, "secondary_name": "ida_mcp_rect_contains", "ratio": 1.0, "nodes1": 5, "nodes2": 5, "description": "Same RVA and hash"},
+    {"line": 10, "type": "best", "primary": 5368714864, "primary_name": "ida_mcp_node_create", "secondary": 5368714864, "secondary_name": "ida_mcp_node_create", "ratio": 1.0, "nodes1": 4, "nodes2": 4, "description": "Same RVA and hash"},
+    {"line": 11, "type": "best", "primary": 5368714976, "primary_name": "ida_mcp_list_push_back", "secondary": 5368714976, "secondary_name": "ida_mcp_list_push_back", "ratio": 1.0, "nodes1": 7, "nodes2": 7, "description": "Same RVA and hash"},
+    {"line": 12, "type": "best", "primary": 5368715152, "primary_name": "ida_mcp_list_find", "secondary": 5368715152, "secondary_name": "ida_mcp_list_find", "ratio": 1.0, "nodes1": 7, "nodes2": 7, "description": "Same RVA and hash"},
+    {"line": 13, "type": "best", "primary": 5368715248, "primary_name": "ida_mcp_list_sum", "secondary": 5368715248, "secondary_name": "ida_mcp_list_sum", "ratio": 1.0, "nodes1": 4, "nodes2": 4, "description": "Same RVA and hash"},
+    {"line": 14, "type": "best", "primary": 5368715328, "primary_name": "ida_mcp_list_clear", "secondary": 5368715328, "secondary_name": "ida_mcp_list_clear", "ratio": 1.0, "nodes1": 4, "nodes2": 4, "description": "Same RVA and hash"}
+  ],
+  "unmatched_samples": [
+    {"type": "primary", "line": 0, "address": 5368714224, "name": "atexit"},
+    {"type": "primary", "line": 1, "address": 5368714240, "name": "safe_flush"},
+    {"type": "primary", "line": 2, "address": 5368714256, "name": "__mingw_invalidParameterHandler"},
+    {"type": "primary", "line": 3, "address": 5368717488, "name": "__tlregdtor"},
+    {"type": "primary", "line": 4, "address": 5368717504, "name": "__dyn_tls_dtor"}
+  ],
+  "notes": [
+    "IDA MCP function count and exported functions both equal 113.",
+    "Self-diff accepts 56 functions under current Diaphora SQL and M4 ratio cleanup.",
+    "The first unmatched samples are short thunk/CRT functions, not missing exports.",
+    "This is a calibration baseline, not a claim of final Python Diaphora parity."
+  ]
+}

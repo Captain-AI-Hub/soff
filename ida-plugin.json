@@ -1,0 +1,12 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "soff",
+    "entryPoint": "soff",
+    "categories": ["diffing-and-matching"],
+    "logoPath": "docs/architecture.svg",
+    "idaVersions": "9.3",
+    "description": "C++ rewrite skeleton for a Diaphora-like IDA diffing plugin.",
+    "version": "0.1.0"
+  }
+}

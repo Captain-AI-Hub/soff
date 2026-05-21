@@ -1,0 +1,94 @@
+{
+  "source_db": "G:\\DM\\diaphora-cpp\\test\\1.sqlite",
+  "result_db": "G:\\DM\\diaphora-cpp\\test\\1_self.diaphora",
+  "ida_input": "G:\\DM\\Sarma\\ide\\resources\\ida_mcp\\test\\samples\\complex.exe",
+  "export": {
+    "ida_functions": 113,
+    "exported_functions": 67,
+    "skipped_functions": 46,
+    "skip_reasons": {
+      "thunk": 46
+    },
+    "tables": 14,
+    "indexes": 44,
+    "instructions": 2335,
+    "basic_blocks": 491,
+    "bb_relations": 653,
+    "bb_instructions": 2335,
+    "function_bblocks": 491,
+    "callgraph": 162,
+    "constants": 267
+  },
+  "field_fill": {
+    "functions": 67,
+    "names_nonempty": 54,
+    "assembly": 67,
+    "clean_assembly": 67,
+    "assembly_addrs": 67,
+    "bytes_sum": 67,
+    "function_flags": 67,
+    "prototype": 65,
+    "prototype2": 65,
+    "comment": 3,
+    "indegree_nonzero": 42,
+    "outdegree_nonzero": 33
+  },
+  "self_diff": {
+    "heuristics": 50,
+    "same_processor": true,
+    "candidates": 2815,
+    "accepted": 56,
+    "multimatches": 0,
+    "best": 56,
+    "partial": 0,
+    "unreliable": 0,
+    "result_multimatch": 0,
+    "unmatched_primary": 11,
+    "unmatched_secondary": 11,
+    "row_limited": 0,
+    "timed_out": 0,
+    "cancelled": 0
+  },
+  "nonzero_heuristics": [
+    {"name": "Same RVA and hash", "candidates": 41, "accepted": 41, "rejected": 0, "skipped": 0, "multimatches": 0},
+    {"name": "Same order and hash", "candidates": 53, "accepted": 12, "rejected": 0, "skipped": 41, "multimatches": 0},
+    {"name": "Function Hash", "candidates": 53, "accepted": 0, "rejected": 0, "skipped": 53, "multimatches": 0},
+    {"name": "Bytes hash", "candidates": 56, "accepted": 3, "rejected": 0, "skipped": 53, "multimatches": 0},
+    {"name": "Same address and mnemonics", "candidates": 56, "accepted": 0, "rejected": 0, "skipped": 56, "multimatches": 0},
+    {"name": "Same cleaned assembly", "candidates": 41, "accepted": 0, "rejected": 0, "skipped": 41, "multimatches": 0},
+    {"name": "Same address, nodes, edges and mnemonics", "candidates": 41, "accepted": 0, "rejected": 0, "skipped": 41, "multimatches": 0},
+    {"name": "Same RVA", "candidates": 41, "accepted": 0, "rejected": 0, "skipped": 41, "multimatches": 0},
+    {"name": "Equal assembly or pseudo-code", "candidates": 56, "accepted": 0, "rejected": 0, "skipped": 56, "multimatches": 0},
+    {"name": "Same constants", "candidates": 51, "accepted": 0, "rejected": 8, "skipped": 43, "multimatches": 0},
+    {"name": "Same address and rare constant", "candidates": 56, "accepted": 0, "rejected": 0, "skipped": 56, "multimatches": 0},
+    {"name": "Same rare constant", "candidates": 2219, "accepted": 0, "rejected": 1364, "skipped": 855, "multimatches": 0},
+    {"name": "Mnemonics and names", "candidates": 51, "accepted": 0, "rejected": 0, "skipped": 51, "multimatches": 0}
+  ],
+  "top_matches": [
+    {"primary_name": "WinMainCRTStartup", "secondary_name": "WinMainCRTStartup", "ratio": 1.0, "description": "Same RVA and hash"},
+    {"primary_name": "__tmainCRTStartup", "secondary_name": "__tmainCRTStartup", "ratio": 1.0, "description": "Same RVA and hash"},
+    {"primary_name": "mainCRTStartup", "secondary_name": "mainCRTStartup", "ratio": 1.0, "description": "Same RVA and hash"},
+    {"primary_name": "ida_mcp_point_make", "secondary_name": "ida_mcp_point_make", "ratio": 1.0, "description": "Same order and hash"},
+    {"primary_name": "ida_mcp_point_distance_squared", "secondary_name": "ida_mcp_point_distance_squared", "ratio": 1.0, "description": "Same order and hash"}
+  ],
+  "unmatched_samples": [
+    "safe_flush",
+    "__mingw_invalidParameterHandler",
+    "__tlregdtor",
+    "__dyn_tls_dtor",
+    "__mingw_setusermatherr",
+    "_fpreset",
+    "_setargv",
+    "__guard_check_icall_dummy",
+    "__p___initenv",
+    "_guard_dispatch_icall_dummy",
+    "__local_stdio_printf_options"
+  ],
+  "notes": [
+    "IDA-MCP reports 113 functions and 45 imports for the same IDB.",
+    "SOFF exports 67 functions after default thunk filtering; all skipped functions are recorded as thunk.",
+    "Diaphora-style MD5 bytes_hash/function_hash and clean_assembly normalization are enabled.",
+    "Operand/import names aggregation populates non-empty functions.names for 54 of 67 exported functions.",
+    "Self-diff multimatches are zero after skipping weak candidates whose primary and secondary functions were both already matched."
+  ]
+}

@@ -1,0 +1,446 @@
+#include "soff/diff/propagation.hpp"
+
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace soff::diff {
+namespace {
+
+Address parse_addr(const std::string& text)
+{
+    Address addr = 0;
+    const auto* begin = text.data();
+    const auto* end = text.data() + text.size();
+    const auto result = std::from_chars(begin, end, addr, 10);
+    if (result.ec == std::errc{} && result.ptr == end) return addr;
+    std::size_t consumed = 0;
+    addr = static_cast<Address>(std::stoull(text, &consumed, 0));
+    return addr;
+}
+
+int parse_int_safe(const std::string& text)
+{
+    if (text.empty()) return 0;
+    try { return std::stoi(text); } catch (...) { return 0; }
+}
+
+bool already_matched(Address addr,
+    const boost::unordered_flat_set<Address>& primary_set,
+    const boost::unordered_flat_set<Address>& secondary_set,
+    bool is_primary)
+{
+    return is_primary
+        ? primary_set.find(addr) != primary_set.end()
+        : secondary_set.find(addr) != secondary_set.end();
+}
+
+struct FuncRow
+{
+    Address address = 0;
+    std::string name;
+    int nodes = 0;
+};
+
+std::vector<FuncRow> query_functions_in_range(
+    db::Database& database,
+    Address low, Address high,
+    const std::string& prefix)
+{
+    std::vector<FuncRow> result;
+    const auto sql = "select address, name, nodes from " + prefix
+        + "functions where address >= " + std::to_string(low)
+        + " and address <= " + std::to_string(high)
+        + " order by address";
+    for (const auto& row : database.query_rows(sql)) {
+        if (row.size() < 3) continue;
+        FuncRow fr;
+        fr.address = parse_addr(row[0]);
+        fr.name = row[1];
+        fr.nodes = parse_int_safe(row[2]);
+        result.push_back(std::move(fr));
+    }
+    return result;
+}
+
+} // namespace
+
+std::size_t find_same_name(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    bool same_processor)
+{
+    constexpr double bonus_ratio = 0.01;
+    std::size_t added = 0;
+    const auto sql =
+        "select f.address, f.name, df.address, df.name, f.nodes, df.nodes, "
+        "f.clean_assembly, df.clean_assembly, f.clean_pseudo, df.clean_pseudo "
+        "from functions f, diff.functions df "
+        "where f.name = df.name and f.name not like 'sub_%' "
+        "and f.name not like 'nullsub_%' "
+        "and f.name not like 'j_%' "
+        "and f.name != 'unknown' "
+        "and length(f.name) > 3 "
+        "order by f.address";
+
+    for (const auto& row : database.query_rows(sql)) {
+        if (row.size() < 10) continue;
+        const auto primary_addr = parse_addr(row[0]);
+        const auto secondary_addr = parse_addr(row[2]);
+
+        if (matched_primary.find(primary_addr) != matched_primary.end()) continue;
+        if (matched_secondary.find(secondary_addr) != matched_secondary.end()) continue;
+
+        double ratio = 1.0;
+        const auto& clean_asm1 = row[6];
+        const auto& clean_asm2 = row[7];
+        const auto& clean_pseudo1 = row[8];
+        const auto& clean_pseudo2 = row[9];
+
+        if (!clean_asm1.empty() && clean_asm1 == clean_asm2) {
+            ratio = 1.0;
+        } else if (!clean_pseudo1.empty() && clean_pseudo1 == clean_pseudo2) {
+            ratio = 1.0;
+        } else {
+            ratio = candidate_text_ratio("", "", "", "",
+                clean_asm1, clean_asm2, clean_pseudo1, clean_pseudo2);
+        }
+
+        if (ratio < min_ratio) continue;
+
+        // Bonus ratio: boost near-perfect same-name matches
+        if (ratio < 1.0 && ratio + bonus_ratio < 1.0) {
+            ratio += bonus_ratio;
+        }
+
+        db::ResultMatch match;
+        match.kind = ratio >= 1.0 ? db::ResultKind::best : db::ResultKind::partial;
+        match.line = static_cast<int>(matches.size());
+        match.primary = primary_addr;
+        match.primary_name = row[1];
+        match.secondary = secondary_addr;
+        match.secondary_name = row[3];
+        match.ratio = ratio;
+        match.primary_nodes = parse_int_safe(row[4]);
+        match.secondary_nodes = parse_int_safe(row[5]);
+        match.description = "Same name";
+        matches.push_back(std::move(match));
+        matched_primary.insert(primary_addr);
+        matched_secondary.insert(secondary_addr);
+        ++added;
+    }
+    return added;
+}
+
+std::size_t find_locally_affine_functions(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    int max_gap_size,
+    bool same_processor)
+{
+    struct AddrPair { Address primary; Address secondary; };
+    std::vector<AddrPair> sorted_matches;
+    sorted_matches.reserve(matches.size());
+    for (const auto& m : matches) {
+        if (m.kind == db::ResultKind::best || m.kind == db::ResultKind::partial) {
+            sorted_matches.push_back({m.primary, m.secondary});
+        }
+    }
+    std::sort(sorted_matches.begin(), sorted_matches.end(),
+        [](const auto& a, const auto& b) { return a.primary < b.primary; });
+
+    std::size_t added = 0;
+    for (std::size_t i = 0; i + 1 < sorted_matches.size(); ++i) {
+        const auto primary_low = sorted_matches[i].primary;
+        const auto primary_high = sorted_matches[i + 1].primary;
+        const auto secondary_low = sorted_matches[i].secondary;
+        const auto secondary_high = sorted_matches[i + 1].secondary;
+
+        if (primary_high <= primary_low || secondary_high <= secondary_low) continue;
+
+        const auto gap_primary = query_functions_in_range(
+            database, primary_low + 1, primary_high - 1, "");
+        const auto gap_secondary = query_functions_in_range(
+            database, secondary_low + 1, secondary_high - 1, "diff.");
+
+        if (gap_primary.empty() || gap_secondary.empty()) continue;
+        if (static_cast<int>(gap_primary.size()) > max_gap_size) continue;
+        if (static_cast<int>(gap_secondary.size()) > max_gap_size) continue;
+
+        for (const auto& pf : gap_primary) {
+            if (matched_primary.find(pf.address) != matched_primary.end()) continue;
+
+            for (const auto& sf : gap_secondary) {
+                if (matched_secondary.find(sf.address) != matched_secondary.end()) continue;
+
+                if (pf.name == sf.name && !pf.name.empty()
+                    && pf.name.substr(0, 4) != "sub_") {
+                    db::ResultMatch match;
+                    match.kind = db::ResultKind::partial;
+                    match.line = static_cast<int>(matches.size());
+                    match.primary = pf.address;
+                    match.primary_name = pf.name;
+                    match.secondary = sf.address;
+                    match.secondary_name = sf.name;
+                    match.ratio = 0.7;
+                    match.primary_nodes = pf.nodes;
+                    match.secondary_nodes = sf.nodes;
+                    match.description = "Locally affine (same name)";
+                    matches.push_back(std::move(match));
+                    matched_primary.insert(pf.address);
+                    matched_secondary.insert(sf.address);
+                    ++added;
+                    break;
+                }
+            }
+        }
+    }
+    return added;
+}
+
+std::size_t find_matches_diffing(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    bool same_processor)
+{
+    constexpr double bonus_ratio = 0.01;
+    std::size_t added = 0;
+
+    const auto current_size = matches.size();
+    for (std::size_t i = 0; i < current_size; ++i) {
+        const auto& m = matches[i];
+        if (m.kind != db::ResultKind::best && m.kind != db::ResultKind::partial) continue;
+        if (m.ratio < 0.5) continue;
+
+        const auto field = same_processor ? "assembly" : "pseudocode";
+        const auto sql_p = "select " + std::string(field) + ", names from functions where address = '"
+            + std::to_string(m.primary) + "' limit 1";
+        const auto sql_s = "select " + std::string(field) + ", names from diff.functions where address = '"
+            + std::to_string(m.secondary) + "' limit 1";
+
+        const auto rows_p = database.query_rows(sql_p);
+        const auto rows_s = database.query_rows(sql_s);
+        if (rows_p.empty() || rows_s.empty()) continue;
+        if (rows_p.front().size() < 2 || rows_s.front().size() < 2) continue;
+
+        const auto& names_p = rows_p.front()[1];
+        const auto& names_s = rows_s.front()[1];
+        if (names_p.empty() || names_s.empty()) continue;
+
+        auto extract_names = [](const std::string& json) {
+            std::vector<std::string> result;
+            std::size_t pos = 0;
+            while (pos < json.size()) {
+                const auto q1 = json.find('"', pos);
+                if (q1 == std::string::npos) break;
+                const auto q2 = json.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                auto name = json.substr(q1 + 1, q2 - q1 - 1);
+                if (!name.empty() && name.substr(0, 4) != "sub_"
+                    && name.substr(0, 8) != "nullsub_"
+                    && name.substr(0, 2) != "j_"
+                    && name.size() > 3) {
+                    result.push_back(std::move(name));
+                }
+                pos = q2 + 1;
+            }
+            return result;
+        };
+
+        const auto primary_names = extract_names(names_p);
+        const auto secondary_names = extract_names(names_s);
+
+        for (const auto& pn : primary_names) {
+            for (const auto& sn : secondary_names) {
+                if (pn != sn) continue;
+
+                const auto lookup_p = database.query_rows(
+                    "select address, name, nodes from functions where name = '"
+                    + pn + "' limit 1");
+                const auto lookup_s = database.query_rows(
+                    "select address, name, nodes from diff.functions where name = '"
+                    + sn + "' limit 1");
+                if (lookup_p.empty() || lookup_s.empty()) continue;
+                if (lookup_p.front().size() < 3 || lookup_s.front().size() < 3) continue;
+
+                const auto addr_p = parse_addr(lookup_p.front()[0]);
+                const auto addr_s = parse_addr(lookup_s.front()[0]);
+                if (matched_primary.find(addr_p) != matched_primary.end()) continue;
+                if (matched_secondary.find(addr_s) != matched_secondary.end()) continue;
+
+                double ratio = 0.6;
+                if (ratio + bonus_ratio < 1.0) ratio += bonus_ratio;
+
+                db::ResultMatch new_match;
+                new_match.kind = db::ResultKind::partial;
+                new_match.line = static_cast<int>(matches.size());
+                new_match.primary = addr_p;
+                new_match.primary_name = lookup_p.front()[1];
+                new_match.secondary = addr_s;
+                new_match.secondary_name = lookup_s.front()[1];
+                new_match.ratio = ratio;
+                new_match.primary_nodes = parse_int_safe(lookup_p.front()[2]);
+                new_match.secondary_nodes = parse_int_safe(lookup_s.front()[2]);
+                new_match.description = "Matches diffing";
+                matches.push_back(std::move(new_match));
+                matched_primary.insert(addr_p);
+                matched_secondary.insert(addr_s);
+                ++added;
+                break;
+            }
+        }
+    }
+    return added;
+}
+
+std::size_t find_related_constants(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio)
+{
+    std::size_t added = 0;
+    const auto current_size = matches.size();
+
+    for (std::size_t i = 0; i < current_size; ++i) {
+        const auto& m = matches[i];
+        if (m.kind != db::ResultKind::best && m.kind != db::ResultKind::partial) continue;
+        if (m.ratio < min_ratio) continue;
+
+        const auto sql_p = "select constant from constants where func_id = '"
+            + std::to_string(m.primary) + "'";
+        const auto sql_s = "select constant from constants where func_id = '"
+            + std::to_string(m.secondary) + "'";
+
+        const auto rows_p = database.query_rows(sql_p);
+        const auto rows_s = database.query_rows("select constant from diff.constants where func_id = '"
+            + std::to_string(m.secondary) + "'");
+
+        if (rows_p.empty() || rows_s.empty()) continue;
+
+        boost::unordered_flat_set<std::string> constants_p;
+        for (const auto& r : rows_p) {
+            if (!r.empty() && !r[0].empty()) constants_p.insert(r[0]);
+        }
+
+        std::vector<std::string> shared;
+        for (const auto& r : rows_s) {
+            if (!r.empty() && constants_p.find(r[0]) != constants_p.end()) {
+                shared.push_back(r[0]);
+            }
+        }
+        if (shared.empty()) continue;
+
+        for (const auto& constant : shared) {
+            const auto funcs_p = database.query_rows(
+                "select distinct func_id from constants where constant = '"
+                + constant + "'");
+            const auto funcs_s = database.query_rows(
+                "select distinct func_id from diff.constants where constant = '"
+                + constant + "'");
+
+            for (const auto& fp : funcs_p) {
+                if (fp.empty()) continue;
+                const auto addr_p = parse_addr(fp[0]);
+                if (matched_primary.find(addr_p) != matched_primary.end()) continue;
+
+                for (const auto& fs : funcs_s) {
+                    if (fs.empty()) continue;
+                    const auto addr_s = parse_addr(fs[0]);
+                    if (matched_secondary.find(addr_s) != matched_secondary.end()) continue;
+
+                    const auto info_p = database.query_rows(
+                        "select name, nodes from functions where address = '"
+                        + std::to_string(addr_p) + "' limit 1");
+                    const auto info_s = database.query_rows(
+                        "select name, nodes from diff.functions where address = '"
+                        + std::to_string(addr_s) + "' limit 1");
+                    if (info_p.empty() || info_s.empty()) continue;
+                    if (info_p.front().size() < 2 || info_s.front().size() < 2) continue;
+
+                    const auto& name_p = info_p.front()[0];
+                    const auto& name_s = info_s.front()[0];
+                    if (name_p != name_s) continue;
+                    if (name_p.substr(0, 4) == "sub_") continue;
+
+                    db::ResultMatch new_match;
+                    new_match.kind = db::ResultKind::partial;
+                    new_match.line = static_cast<int>(matches.size());
+                    new_match.primary = addr_p;
+                    new_match.primary_name = name_p;
+                    new_match.secondary = addr_s;
+                    new_match.secondary_name = name_s;
+                    new_match.ratio = 0.6;
+                    new_match.primary_nodes = parse_int_safe(info_p.front()[1]);
+                    new_match.secondary_nodes = parse_int_safe(info_s.front()[1]);
+                    new_match.description = "Related constants";
+                    matches.push_back(std::move(new_match));
+                    matched_primary.insert(addr_p);
+                    matched_secondary.insert(addr_s);
+                    ++added;
+                    goto next_constant;
+                }
+            }
+            next_constant:;
+        }
+    }
+    return added;
+}
+
+PropagationStats run_propagation(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    const PropagationOptions& options)
+{
+    PropagationStats stats;
+    if (!options.enabled) return stats;
+
+    stats.same_name_matches = find_same_name(
+        database, matches, matched_primary, matched_secondary,
+        options.same_name_min_ratio, options.same_processor);
+
+    for (int iter = 0; iter < options.max_iterations; ++iter) {
+        std::size_t round_added = 0;
+
+        const auto diffing = find_matches_diffing(
+            database, matches, matched_primary, matched_secondary,
+            options.diffing_min_ratio, options.same_processor);
+        stats.diffing_matches += diffing;
+        round_added += diffing;
+
+        const auto related = find_related_constants(
+            database, matches, matched_primary, matched_secondary,
+            options.related_min_ratio);
+        stats.related_constants_matches += related;
+        round_added += related;
+
+        const auto affine = find_locally_affine_functions(
+            database, matches, matched_primary, matched_secondary,
+            options.affine_min_ratio, options.max_functions_per_gap,
+            options.same_processor);
+        stats.affine_matches += affine;
+        round_added += affine;
+
+        stats.iterations_run = iter + 1;
+        if (round_added == 0) break;
+    }
+
+    return stats;
+}
+
+} // namespace soff::diff

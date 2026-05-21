@@ -1,0 +1,47 @@
+# Build
+build/
+.xmake/
+
+# Compiled objects & binaries
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDA databases
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# Test artifacts
+*.sqlite
+*.soff
+*.crash
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Package cache
+packages/
