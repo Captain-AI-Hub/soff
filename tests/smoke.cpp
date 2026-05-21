@@ -12,7 +12,6 @@
 #include "soff/diff/ratio.hpp"
 #include "soff/diff/session.hpp"
 #include "soff/diff/sql_runner.hpp"
-#include "soff/export/exporter.hpp"
 #include "soff/ui/html_diff.hpp"
 #include "soff/ui/import_plan.hpp"
 
@@ -723,7 +722,6 @@ int main()
     }
     std::cout << "propagation: session integration test passed\n";
 
-    std::cout << soff::Exporter{}.describe(snapshot) << '\n';
     std::cout << "schema tables=" << soff::db::diaphora_compatible_schema().tables.size()
               << " heuristics=" << heuristics.size() << '\n';
     std::cout << "db=" << db_path.string() << '\n';

@@ -23,8 +23,6 @@ target("soff_core")
         "src/analysis/*.cpp",
         "src/db/*.cpp",
         "src/diff/*.cpp",
-        "src/export/*.cpp",
-        "src/ida/*.cpp",
         "src/ui/*.cpp"
     )
 
