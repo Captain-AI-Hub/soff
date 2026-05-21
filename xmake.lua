@@ -52,7 +52,7 @@ if has_config("ida_plugin") then
             add_defines("__NT__")
             add_linkdirs(path.join(ida_sdk, "lib", "x64_win_vc_64"))
             add_links("ida")
-            add_syslinks("user32", "advapi32", "shell32", "crypt32")
+            add_syslinks("user32", "advapi32", "shell32")
         elseif is_plat("linux") then
             set_filename("soff.so")
             add_defines("__LINUX__")
@@ -61,7 +61,11 @@ if has_config("ida_plugin") then
         elseif is_plat("macosx") then
             set_filename("soff.dylib")
             add_defines("__MAC__")
-            add_linkdirs(path.join(ida_sdk, "lib", "x64_mac_clang_64"))
+            if is_arch("arm64") then
+                add_linkdirs(path.join(ida_sdk, "lib", "arm64_mac_clang_64"))
+            else
+                add_linkdirs(path.join(ida_sdk, "lib", "x64_mac_clang_64"))
+            end
             add_links("ida")
         end
 end

@@ -18,7 +18,6 @@
 #endif
 #if defined(_WIN32)
 #include <windows.h>
-#include <wincrypt.h>
 #include <shellapi.h>
 #else
 #include <cstdio>
@@ -706,35 +705,6 @@ std::string hex_bytes(const std::uint8_t* bytes, std::size_t size)
 
 std::string md5_hex(const std::vector<std::uint8_t>& bytes)
 {
-#if defined(_WIN32)
-    HCRYPTPROV provider = 0;
-    HCRYPTHASH hash = 0;
-    if (!CryptAcquireContextA(&provider, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        throw soff::Error(soff::ErrorCode::export_failed, "CryptAcquireContextA failed");
-    }
-    const auto release_provider = [&]() {
-        if (hash != 0) CryptDestroyHash(hash);
-        if (provider != 0) CryptReleaseContext(provider, 0);
-    };
-    if (!CryptCreateHash(provider, CALG_MD5, 0, 0, &hash)) {
-        release_provider();
-        throw soff::Error(soff::ErrorCode::export_failed, "CryptCreateHash(MD5) failed");
-    }
-    if (!bytes.empty() && !CryptHashData(hash, bytes.data(), static_cast<DWORD>(bytes.size()), 0)) {
-        release_provider();
-        throw soff::Error(soff::ErrorCode::export_failed, "CryptHashData(MD5) failed");
-    }
-    std::uint8_t digest[16] = {};
-    DWORD digest_size = sizeof(digest);
-    if (!CryptGetHashParam(hash, HP_HASHVAL, digest, &digest_size, 0)) {
-        release_provider();
-        throw soff::Error(soff::ErrorCode::export_failed, "CryptGetHashParam(MD5) failed");
-    }
-    const auto out = hex_bytes(digest, digest_size);
-    release_provider();
-    return out;
-#else
-    // Cross-platform: use boost::uuids::detail::md5
     boost::uuids::detail::md5 hasher;
     if (!bytes.empty()) {
         hasher.process_bytes(bytes.data(), bytes.size());
@@ -744,7 +714,6 @@ std::string md5_hex(const std::vector<std::uint8_t>& bytes)
     std::uint8_t raw[16];
     std::memcpy(raw, digest, 16);
     return hex_bytes(raw, 16);
-#endif
 }
 
 std::vector<std::uint8_t> bytes_from_text(std::string_view text)

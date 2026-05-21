@@ -5,15 +5,17 @@ build/
 # Compiled objects & binaries
 *.obj
 *.o
-*.a
-*.lib
 *.pdb
 *.ilk
 *.exp
 *.exe
-*.dll
-*.so
-*.dylib
+
+# Binaries in build output (not in ida-sdk)
+/build/**/*.lib
+/build/**/*.a
+/build/**/*.dll
+/build/**/*.so
+/build/**/*.dylib
 
 # IDA databases
 *.i64
