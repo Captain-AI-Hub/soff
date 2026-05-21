@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     strategy:
@@ -16,17 +13,17 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: soff.dll
+            artifact: soff-windows-x64
             plugin_path: build/windows/x64/release/soff.dll
           - os: ubuntu-latest
-            artifact: soff.so
+            artifact: soff-linux-x64
             plugin_path: build/linux/x86_64/release/soff.so
           - os: macos-latest
-            artifact: soff.dylib
+            artifact: soff-macos-arm64
             plugin_path: build/macosx/arm64/release/soff.dylib
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Install xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -59,7 +56,41 @@ jobs:
         run: xmake run soff_smoke
 
       - name: Upload plugin
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.plugin_path }}
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate tag
+        id: tag
+        run: echo "tag=build-$(date +'%Y%m%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mv artifacts/soff-windows-x64/soff.dll artifacts/soff-windows-x64.dll
+          mv artifacts/soff-linux-x64/soff.so artifacts/soff-linux-x64.so
+          mv artifacts/soff-macos-arm64/soff.dylib artifacts/soff-macos-arm64.dylib
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.tag.outputs.tag }} \
+            --title "Build ${{ steps.tag.outputs.tag }}" \
+            --notes "Automated build from commit ${{ github.sha }}" \
+            artifacts/soff-windows-x64.dll \
+            artifacts/soff-linux-x64.so \
+            artifacts/soff-macos-arm64.dylib
