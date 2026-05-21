@@ -1,3 +1,6 @@
+#include <fstream>
+#include <sstream>
+
 #include "soff/core/version.hpp"
 #include "soff/core/error.hpp"
 #include "soff/db/database.hpp"
@@ -54,7 +57,6 @@
 #include <numeric>
 #include <regex>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -213,34 +215,11 @@ void copy_path_to_buffer(char* buffer, std::size_t buffer_size, const std::files
 
 std::string read_text_file(const std::filesystem::path& path)
 {
-    const auto text_path = path.string();
-    HANDLE file = CreateFileA(
-        text_path.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return "";
-    }
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 65536) {
-        CloseHandle(file);
-        return "";
-    }
-
-    std::string content(static_cast<std::size_t>(size.QuadPart), '\0');
-    DWORD read = 0;
-    const BOOL ok = ReadFile(file, content.data(), static_cast<DWORD>(content.size()), &read, nullptr);
-    CloseHandle(file);
-    if (!ok) {
-        return "";
-    }
-    content.resize(read);
-    return content;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return "";
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
 }
 
 std::filesystem::path default_export_path()
@@ -672,24 +651,13 @@ std::string escape_marker_value(std::string value)
 
 void write_crash_marker(const std::filesystem::path& crash_path, const std::string& content)
 {
-    const auto path = crash_path.string();
-    HANDLE file = CreateFileA(
-        path.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        throw soff::Error(soff::ErrorCode::export_failed, "failed to create export crash marker: " + path);
+    std::ofstream file(crash_path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        throw soff::Error(soff::ErrorCode::export_failed, "failed to create export crash marker: " + crash_path.string());
     }
-
-    DWORD written = 0;
-    const BOOL ok = WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr);
-    CloseHandle(file);
-    if (!ok || written != content.size()) {
-        throw soff::Error(soff::ErrorCode::export_failed, "failed to write export crash marker: " + path);
+    file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!file) {
+        throw soff::Error(soff::ErrorCode::export_failed, "failed to write export crash marker: " + crash_path.string());
     }
 }
 
@@ -3386,27 +3354,10 @@ std::filesystem::path default_call_context_path(
 
 bool write_text_file(const std::filesystem::path& path, const std::string& content)
 {
-    const auto path_text = path.string();
-    HANDLE file = CreateFileA(
-        path_text.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    DWORD written = 0;
-    const BOOL ok = WriteFile(
-        file,
-        content.data(),
-        static_cast<DWORD>(content.size()),
-        &written,
-        nullptr);
-    CloseHandle(file);
-    return ok && written == content.size();
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return file.good();
 }
 
 bool open_file_with_shell(const std::filesystem::path& path)

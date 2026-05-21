@@ -37,7 +37,7 @@ target("soff_smoke")
     add_files("tests/*.cpp")
 
 if has_config("ida_plugin") then
-    local ida_sdk = get_config("ida_sdk")
+    local ida_sdk = path.join("$(projectdir)", get_config("ida_sdk"))
 
     target("soff_ida")
         set_kind("shared")
