@@ -18,6 +18,9 @@ target("soff_core")
     set_kind("static")
     add_includedirs("include", {public = true})
     add_packages("boost", {public = true})
+    if is_plat("linux", "macosx") then
+        add_cxflags("-fPIC")
+    end
     add_files(
         "src/core/*.cpp",
         "src/analysis/*.cpp",
@@ -61,6 +64,7 @@ if has_config("ida_plugin") then
         elseif is_plat("macosx") then
             set_filename("soff.dylib")
             add_defines("__MAC__")
+            add_cxflags("-Wno-nullability-completeness", "-Wno-nullability-extension", {force = true})
             if is_arch("arm64") then
                 add_linkdirs(path.join(ida_sdk, "lib", "arm64_mac_clang_64"))
             else
