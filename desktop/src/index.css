@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0f0f17;
+  --bg-secondary: #16161e;
+  --bg-surface: #1e1e2e;
+  --bg-hover: #2a2a3c;
+  --bg-active: #313244;
+  --text-primary: #e2e8f0;
+  --text-secondary: #a1a8b8;
+  --text-muted: #5c6370;
+  --accent: #7aa2f7;
+  --accent-hover: #89b4fa;
+  --accent-glow: rgba(122, 162, 247, 0.15);
+  --green: #9ece6a;
+  --green-bg: rgba(158, 206, 106, 0.08);
+  --red: #f7768e;
+  --red-bg: rgba(247, 118, 142, 0.08);
+  --yellow: #e0af68;
+  --orange: #ff9e64;
+  --border: #282838;
+  --border-subtle: #1e1e2e;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --radius: 6px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", monospace;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 12px 4px var(--accent-glow); }
+}
+
+.animate-fade-in { animation: fadeIn 0.2s ease-out; }
+.animate-glow { animation: pulse-glow 2s ease-in-out infinite; }
+
+/* Drag region for window */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Table row hover effect */
+.row-hover {
+  transition: background 0.1s ease;
+}
+.row-hover:hover {
+  background: var(--bg-hover);
+}
+
+/* Ratio bar */
+.ratio-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.ratio-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}

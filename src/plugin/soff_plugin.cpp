@@ -6389,138 +6389,9 @@ static error_t idaapi idc_soff_export(idc_value_t* argv, idc_value_t* res)
     return eOk;
 }
 
-// IDC function: soff_diff(main_db, diff_db, result_db) -> JSON string
-static error_t idaapi idc_soff_diff(idc_value_t* argv, idc_value_t* res)
-{
-    DiffUiOptions options;
-    options.main_db = argv[0].c_str();
-    options.diff_db = argv[1].c_str();
-    options.result_db = argv[2].c_str();
-    try {
-        const auto summary = diff_databases(options);
-        std::ostringstream json;
-        json << "{\"best\":" << summary.results.best
-             << ",\"partial\":" << summary.results.partial
-             << ",\"unreliable\":" << summary.results.unreliable
-             << ",\"unmatched_primary\":" << summary.results.unmatched_primary
-             << ",\"unmatched_secondary\":" << summary.results.unmatched_secondary
-             << ",\"output\":\"" << options.result_db << "\"}";
-        res->set_string(json.str().c_str());
-    } catch (const std::exception& e) {
-        res->set_string((std::string("{\"error\":\"") + e.what() + "\"}").c_str());
-    }
-    return eOk;
-}
-
-// Helper: split text by newlines into vector of lines
-static std::vector<std::string> split_lines(const std::string& text)
-{
-    std::vector<std::string> lines;
-    std::istringstream stream(text);
-    std::string line;
-    while (std::getline(stream, line)) {
-        lines.push_back(std::move(line));
-    }
-    return lines;
-}
-
-// Helper: format line diff entries as unified patch text
-static std::string format_unified_diff(
-    const std::vector<std::string>& left,
-    const std::vector<std::string>& right,
-    const std::vector<soff::ui::DiffEntry>& entries)
-{
-    std::ostringstream out;
-    for (const auto& entry : entries) {
-        switch (entry.kind) {
-        case soff::ui::DiffEntry::same:
-            out << ' ' << left[entry.left_index] << '\n';
-            break;
-        case soff::ui::DiffEntry::removed:
-            out << '-' << left[entry.left_index] << '\n';
-            break;
-        case soff::ui::DiffEntry::added:
-            out << '+' << right[entry.right_index] << '\n';
-            break;
-        }
-    }
-    return out.str();
-}
-
-// Helper: query a column from functions table by address
-static std::string query_function_column(
-    const std::string& db_path,
-    const std::string& address,
-    const std::string& column)
-{
-    soff::db::Database db;
-    db.open(std::filesystem::path(db_path));
-    const auto rows = db.query_rows(
-        "select " + column + " from functions where address = '"
-        + address + "' limit 1");
-    if (rows.empty() || rows[0].empty()) return {};
-    return rows[0][0];
-}
-
-// IDC: soff_diff_asm(main_db, diff_db, primary_addr, secondary_addr)
-static error_t idaapi idc_soff_diff_asm(idc_value_t* argv, idc_value_t* res)
-{
-    try {
-        const std::string main_db = argv[0].c_str();
-        const std::string diff_db = argv[1].c_str();
-        const std::string primary_addr = argv[2].c_str();
-        const std::string secondary_addr = argv[3].c_str();
-
-        const auto left_text = query_function_column(main_db, primary_addr, "assembly");
-        const auto right_text = query_function_column(diff_db, secondary_addr, "assembly");
-
-        const auto left_lines = split_lines(left_text);
-        const auto right_lines = split_lines(right_text);
-        const auto diff = soff::ui::compute_line_diff(left_lines, right_lines);
-        res->set_string(format_unified_diff(left_lines, right_lines, diff).c_str());
-    } catch (const std::exception& e) {
-        res->set_string((std::string("-error: ") + e.what()).c_str());
-    }
-    return eOk;
-}
-
-// IDC: soff_diff_pseudo(main_db, diff_db, primary_addr, secondary_addr)
-static error_t idaapi idc_soff_diff_pseudo(idc_value_t* argv, idc_value_t* res)
-{
-    try {
-        const std::string main_db = argv[0].c_str();
-        const std::string diff_db = argv[1].c_str();
-        const std::string primary_addr = argv[2].c_str();
-        const std::string secondary_addr = argv[3].c_str();
-
-        const auto left_text = query_function_column(main_db, primary_addr, "pseudocode");
-        const auto right_text = query_function_column(diff_db, secondary_addr, "pseudocode");
-
-        const auto left_lines = split_lines(left_text);
-        const auto right_lines = split_lines(right_text);
-        const auto diff = soff::ui::compute_line_diff(left_lines, right_lines);
-        res->set_string(format_unified_diff(left_lines, right_lines, diff).c_str());
-    } catch (const std::exception& e) {
-        res->set_string((std::string("-error: ") + e.what()).c_str());
-    }
-    return eOk;
-}
-
 static const char idc_soff_export_args[] = { VT_STR, 0 };
 static const ext_idcfunc_t idc_soff_export_desc = {
     "soff_export", idc_soff_export, idc_soff_export_args, nullptr, 0, EXTFUN_BASE
-};
-static const char idc_soff_diff_args[] = { VT_STR, VT_STR, VT_STR, 0 };
-static const ext_idcfunc_t idc_soff_diff_desc = {
-    "soff_diff", idc_soff_diff, idc_soff_diff_args, nullptr, 0, EXTFUN_BASE
-};
-static const char idc_soff_diff_asm_args[] = { VT_STR, VT_STR, VT_STR, VT_STR, 0 };
-static const ext_idcfunc_t idc_soff_diff_asm_desc = {
-    "soff_diff_asm", idc_soff_diff_asm, idc_soff_diff_asm_args, nullptr, 0, EXTFUN_BASE
-};
-static const char idc_soff_diff_pseudo_args[] = { VT_STR, VT_STR, VT_STR, VT_STR, 0 };
-static const ext_idcfunc_t idc_soff_diff_pseudo_desc = {
-    "soff_diff_pseudo", idc_soff_diff_pseudo, idc_soff_diff_pseudo_args, nullptr, 0, EXTFUN_BASE
 };
 
 void run_auto_mode()
@@ -6595,9 +6466,6 @@ struct soff_plugin_t : public plugmod_t
     soff_plugin_t()
     {
         add_idc_func(idc_soff_export_desc);
-        add_idc_func(idc_soff_diff_desc);
-        add_idc_func(idc_soff_diff_asm_desc);
-        add_idc_func(idc_soff_diff_pseudo_desc);
 
         menu_created_ = create_menu(menu_id, menu_label, "Options");
         if (!menu_created_) {
@@ -6807,9 +6675,6 @@ struct soff_plugin_t : public plugmod_t
     ~soff_plugin_t() override
     {
         del_idc_func("soff_export");
-        del_idc_func("soff_diff");
-        del_idc_func("soff_diff_asm");
-        del_idc_func("soff_diff_pseudo");
 
         if (local_diff_registered_) {
             detach_action_from_menu(local_diff_menu_path, local_diff_action_name);

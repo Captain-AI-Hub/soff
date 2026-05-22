@@ -6,21 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
+  # ─────────────────────────────────────────────
+  # Job 1: Build soff_core, soff_cli, soff_ida plugin
+  # ─────────────────────────────────────────────
+  native:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             artifact: soff-windows-x64
-            plugin_path: build/windows/x64/release/soff.dll
+            plugin_ext: dll
+            cli_ext: .exe
           - os: ubuntu-latest
             artifact: soff-linux-x64
-            plugin_path: build/linux/x86_64/release/soff.so
+            plugin_ext: so
+            cli_ext: ""
           - os: macos-latest
             artifact: soff-macos-arm64
-            plugin_path: build/macosx/arm64/release/soff.dylib
+            plugin_ext: dylib
+            cli_ext: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +41,7 @@ jobs:
 
       - name: Install SQLite (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       - name: Install SQLite (Windows)
         if: runner.os == 'Windows'
@@ -44,25 +53,91 @@ jobs:
           Copy-Item sqlite\sqlite3.dll -Destination C:\Windows\System32\
 
       - name: Configure
+        working-directory: soff
         run: xmake config --ida_plugin=y -y
 
       - name: Install dependencies
+        working-directory: soff
         run: xmake require -y
 
       - name: Build
+        working-directory: soff
         run: xmake build -y
 
       - name: Test
+        working-directory: soff
         run: xmake run soff_smoke
 
-      - name: Upload plugin
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          find soff/build -name "soff.${{ matrix.plugin_ext }}" -exec cp {} dist/ \;
+          find soff/build -name "soff_cli${{ matrix.cli_ext }}" -exec cp {} dist/ \;
+
+      - name: Upload native artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.plugin_path }}
+          path: dist/
 
+  # ─────────────────────────────────────────────
+  # Job 2: Build desktop app (Tauri)
+  # ─────────────────────────────────────────────
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: desktop-windows-x64
+            bundle_glob: "soff/desktop/src-tauri/target/release/bundle/nsis/*.exe"
+          - os: ubuntu-latest
+            artifact: desktop-linux-x64
+            bundle_glob: "soff/desktop/src-tauri/target/release/bundle/deb/*.deb"
+          - os: macos-latest
+            artifact: desktop-macos-arm64
+            bundle_glob: "soff/desktop/src-tauri/target/release/bundle/dmg/*.dmg"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: soff/desktop/src-tauri
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend deps
+        working-directory: soff/desktop
+        run: bun install --frozen-lockfile
+
+      - name: Build Tauri app
+        working-directory: soff/desktop
+        run: bun run tauri build
+
+      - name: Upload desktop installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bundle_glob }}
+
+  # ─────────────────────────────────────────────
+  # Job 3: Create release (main branch only)
+  # ─────────────────────────────────────────────
   release:
-    needs: build
+    needs: [native, desktop]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -72,7 +147,7 @@ jobs:
 
       - name: Generate tag
         id: tag
-        run: echo "tag=build-$(date +'%Y%m%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+        run: echo "tag=v0.1.0-$(date +'%Y%m%d')-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
 
       - uses: actions/download-artifact@v4
         with:
@@ -80,17 +155,26 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          mv artifacts/soff-windows-x64/soff.dll artifacts/soff-windows-x64.dll
-          mv artifacts/soff-linux-x64/soff.so artifacts/soff-linux-x64.so
-          mv artifacts/soff-macos-arm64/soff.dylib artifacts/soff-macos-arm64.dylib
+          mkdir -p release
+
+          # Native: plugin + cli
+          cp artifacts/soff-windows-x64/soff.dll release/soff-windows-x64.dll
+          cp artifacts/soff-windows-x64/soff_cli.exe release/soff_cli-windows-x64.exe
+          cp artifacts/soff-linux-x64/soff.so release/soff-linux-x64.so
+          cp artifacts/soff-linux-x64/soff_cli release/soff_cli-linux-x64
+          cp artifacts/soff-macos-arm64/soff.dylib release/soff-macos-arm64.dylib
+          cp artifacts/soff-macos-arm64/soff_cli release/soff_cli-macos-arm64
+
+          # Desktop installers
+          cp artifacts/desktop-windows-x64/*.exe release/soff-desktop-windows-x64-setup.exe
+          cp artifacts/desktop-linux-x64/*.deb release/soff-desktop-linux-x64.deb
+          cp artifacts/desktop-macos-arm64/*.dmg release/soff-desktop-macos-arm64.dmg
 
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ steps.tag.outputs.tag }} \
-            --title "Build ${{ steps.tag.outputs.tag }}" \
-            --notes "Automated build from commit ${{ github.sha }}" \
-            artifacts/soff-windows-x64.dll \
-            artifacts/soff-linux-x64.so \
-            artifacts/soff-macos-arm64.dylib
+            --title "Soff ${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+            release/*
