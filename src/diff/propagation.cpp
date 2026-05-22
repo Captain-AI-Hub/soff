@@ -4,12 +4,19 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace soff::diff {
 namespace {
+
+bool starts_with(const std::string& s, const char* prefix)
+{
+    const auto len = std::strlen(prefix);
+    return s.size() >= len && s.compare(0, len, prefix) == 0;
+}
 
 Address parse_addr(const std::string& text)
 {
@@ -186,7 +193,7 @@ std::size_t find_locally_affine_functions(
                 if (matched_secondary.find(sf.address) != matched_secondary.end()) continue;
 
                 if (pf.name == sf.name && !pf.name.empty()
-                    && pf.name.substr(0, 4) != "sub_") {
+                    && !starts_with(pf.name, "sub_")) {
                     db::ResultMatch match;
                     match.kind = db::ResultKind::partial;
                     match.line = static_cast<int>(matches.size());
@@ -251,9 +258,9 @@ std::size_t find_matches_diffing(
                 const auto q2 = json.find('"', q1 + 1);
                 if (q2 == std::string::npos) break;
                 auto name = json.substr(q1 + 1, q2 - q1 - 1);
-                if (!name.empty() && name.substr(0, 4) != "sub_"
-                    && name.substr(0, 8) != "nullsub_"
-                    && name.substr(0, 2) != "j_"
+                if (!name.empty() && !starts_with(name, "sub_")
+                    && !starts_with(name, "nullsub_")
+                    && !starts_with(name, "j_")
                     && name.size() > 3) {
                     result.push_back(std::move(name));
                 }
@@ -353,7 +360,7 @@ std::size_t find_matches_diffing(
                     while (name_end < line.size() && line[name_end] != ' ' && line[name_end] != ';' && line[name_end] != '\n') ++name_end;
                     if (name_end > name_start) {
                         auto n = line.substr(name_start, name_end - name_start);
-                        if (n.size() > 3 && n.substr(0, 4) != "sub_" && n.substr(0, 4) != "loc_") {
+                        if (n.size() > 3 && !starts_with(n, "sub_") && !starts_with(n, "loc_")) {
                             names.insert(std::move(n));
                         }
                     }
@@ -514,7 +521,7 @@ std::size_t find_related_constants(
                     const auto& name_p = info_p.front()[0];
                     const auto& name_s = info_s.front()[0];
                     if (name_p != name_s) continue;
-                    if (name_p.substr(0, 4) == "sub_") continue;
+                    if (starts_with(name_p, "sub_")) continue;
 
                     db::ResultMatch new_match;
                     new_match.kind = db::ResultKind::partial;

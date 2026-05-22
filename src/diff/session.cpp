@@ -293,9 +293,9 @@ DiffSessionSummary run_session(
     }
 
     // Auto-tuning: disable slow heuristics for large databases
-    const auto total_functions = static_cast<std::size_t>(
-        database.query_int("select count(*) from functions")
-        + database.query_int("select count(*) from diff.functions"));
+    const auto primary_count = database.query_int("select count(*) from functions");
+    const auto secondary_count = database.query_int("select count(*) from diff.functions");
+    const auto total_functions = static_cast<std::size_t>(primary_count + secondary_count);
     if (total_functions >= options.config.min_functions_to_disable_slow) {
         sql_options.enable_slow = false;
     }
@@ -375,9 +375,7 @@ DiffSessionSummary run_session(
     // Patchdiff-with-symbols fast path: if >90% matched by name, skip heuristics
     bool is_patchdiff_fast_path = false;
     if (!exact_only && !is_stripped_fast_path && !pre_same_name_matches.empty()) {
-        const auto total_primary = database.query_int("select count(*) from functions");
-        const auto total_secondary = database.query_int("select count(*) from diff.functions");
-        const auto min_total = std::min(total_primary, total_secondary);
+        const auto min_total = std::min(primary_count, secondary_count);
         if (min_total > 0) {
             const double percent = 100.0 * static_cast<double>(pre_same_name_matches.size())
                 / static_cast<double>(min_total);

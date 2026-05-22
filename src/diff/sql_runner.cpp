@@ -373,7 +373,7 @@ double compute_ratio(db::Database& database, const CandidateRow& candidate, bool
         ratio = ratio + score < 1.0 ? ratio + score : 0.99;
     }
 
-    return std::min(1.0, std::max(ratio, graph_metric_ratio(candidate) < 0.5 ? ratio : ratio));
+    return std::min(1.0, ratio);
 }
 
 double compute_ratio_fast(const CandidateRow& candidate)

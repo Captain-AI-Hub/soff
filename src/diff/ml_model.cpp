@@ -46,8 +46,9 @@ private:
         return {data_.substr(start, pos_-start), JsonToken::NUMBER};
     }
     JsonToken read_bool() {
-        if (data_.substr(pos_,4)=="true") { pos_+=4; return {"true", JsonToken::BOOL_TRUE}; }
-        pos_+=5; return {"false", JsonToken::BOOL_FALSE};
+        if (pos_ + 4 <= data_.size() && data_.substr(pos_,4)=="true") { pos_+=4; return {"true", JsonToken::BOOL_TRUE}; }
+        if (pos_ + 5 <= data_.size()) pos_+=5; else pos_ = data_.size();
+        return {"false", JsonToken::BOOL_FALSE};
     }
     std::string data_; std::size_t pos_;
 };
@@ -178,7 +179,9 @@ double MlModel::extract_feature(const MlFeatureVector& fv, int index) const
 double MlModel::predict_tree(const std::vector<TreeNode>& tree, const MlFeatureVector& fv) const
 {
     int node_idx = 0;
-    while (node_idx >= 0 && node_idx < static_cast<int>(tree.size())) {
+    const int max_depth = static_cast<int>(tree.size());
+    for (int step = 0; step < max_depth; ++step) {
+        if (node_idx < 0 || node_idx >= static_cast<int>(tree.size())) break;
         const auto& node = tree[static_cast<std::size_t>(node_idx)];
         if (node.is_leaf) return node.value;
         const double feature_val = extract_feature(fv, node.feature);
