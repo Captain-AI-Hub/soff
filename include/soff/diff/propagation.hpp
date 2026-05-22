@@ -14,6 +14,7 @@ namespace soff::diff {
 struct PropagationOptions
 {
     bool enabled = true;
+    bool enable_slow = true;
     int max_iterations = 3;
     double same_name_min_ratio = 0.5;
     double affine_min_ratio = 0.5;
@@ -70,5 +71,13 @@ std::size_t find_related_constants(
     boost::unordered_flat_set<Address>& matched_primary,
     boost::unordered_flat_set<Address>& matched_secondary,
     double min_ratio);
+
+std::size_t find_compilation_unit_matches(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    bool same_processor);
 
 } // namespace soff::diff

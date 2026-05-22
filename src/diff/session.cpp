@@ -3,6 +3,7 @@
 #include "soff/core/hooks.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/repository.hpp"
+#include "soff/diff/ml_model.hpp"
 #include "soff/diff/propagation.hpp"
 
 #include <boost/unordered/unordered_flat_map.hpp>
@@ -291,6 +292,17 @@ DiffSessionSummary run_session(
         sql_options.hooks = options.hooks;
     }
 
+    // Auto-tuning: disable slow heuristics for large databases
+    const auto total_functions = static_cast<std::size_t>(
+        database.query_int("select count(*) from functions")
+        + database.query_int("select count(*) from diff.functions"));
+    if (total_functions >= options.config.min_functions_to_disable_slow) {
+        sql_options.enable_slow = false;
+    }
+    if (total_functions >= options.config.min_functions_to_consider_medium) {
+        sql_options.enable_relaxed_ratio = true;
+    }
+
     SqlHeuristicRunner runner;
     auto equal_matches = find_equal_matches(database);
 
@@ -347,9 +359,37 @@ DiffSessionSummary run_session(
         }
     }
 
+    // Pre-heuristic pass: find_same_name to lock in named function matches early
+    std::vector<db::ResultMatch> pre_same_name_matches;
+    boost::unordered_flat_set<Address> pre_matched_p = sql_options.pre_matched_primary;
+    boost::unordered_flat_set<Address> pre_matched_s = sql_options.pre_matched_secondary;
+    if (!exact_only && !is_stripped_fast_path) {
+        find_same_name(database, pre_same_name_matches, pre_matched_p, pre_matched_s,
+            options.propagation.same_name_min_ratio, sql_options.same_processor);
+        for (const auto& m : pre_same_name_matches) {
+            sql_options.pre_matched_primary.insert(m.primary);
+            sql_options.pre_matched_secondary.insert(m.secondary);
+        }
+    }
+
+    // Patchdiff-with-symbols fast path: if >90% matched by name, skip heuristics
+    bool is_patchdiff_fast_path = false;
+    if (!exact_only && !is_stripped_fast_path && !pre_same_name_matches.empty()) {
+        const auto total_primary = database.query_int("select count(*) from functions");
+        const auto total_secondary = database.query_int("select count(*) from diff.functions");
+        const auto min_total = std::min(total_primary, total_secondary);
+        if (min_total > 0) {
+            const double percent = 100.0 * static_cast<double>(pre_same_name_matches.size())
+                / static_cast<double>(min_total);
+            if (percent >= 90.0) {
+                is_patchdiff_fast_path = true;
+            }
+        }
+    }
+
     SqlHeuristicRunResult run_result;
-    if (is_stripped_fast_path) {
-        // Skip SQL heuristics entirely for stripped binaries
+    if (is_stripped_fast_path || is_patchdiff_fast_path) {
+        // Skip SQL heuristics entirely
     } else {
         run_result = exact_only
             ? runner.run_exact(database, sql_options)
@@ -361,6 +401,8 @@ DiffSessionSummary run_session(
     results.diff_db = diff_db.string();
     if (!exact_only) {
         results.matches = std::move(equal_matches);
+        results.matches.insert(results.matches.end(),
+            pre_same_name_matches.begin(), pre_same_name_matches.end());
         results.matches.insert(results.matches.end(),
             run_result.matches.begin(), run_result.matches.end());
     } else {
@@ -383,6 +425,7 @@ DiffSessionSummary run_session(
     if (!exact_only && options.propagation.enabled) {
         auto prop_options = options.propagation;
         prop_options.same_processor = sql_options.same_processor;
+        prop_options.enable_slow = sql_options.enable_slow;
         propagation_stats = run_propagation(
             database, results.matches,
             matched_primary, matched_secondary, prop_options);
@@ -390,6 +433,13 @@ DiffSessionSummary run_session(
     }
 
     resolve_multimatches(results.matches);
+
+    // ML model post-filter: reject low-confidence partial/unreliable matches
+    if (!options.ml_model_path.empty() && std::filesystem::exists(options.ml_model_path)) {
+        auto model = MlModel::load(options.ml_model_path);
+        model.filter_matches(database, results.matches, matched_primary, matched_secondary);
+    }
+
     final_pass_unmatched(database, results);
     cleanup_result_order(results);
 

@@ -103,6 +103,8 @@ struct ProgramSnapshot
 {
     std::string input_path;
     std::string architecture;
+    std::string callgraph_primes;
+    std::string callgraph_all_primes;
     std::vector<ProgramDataItem> program_data;
     std::vector<FunctionFeature> functions;
 };

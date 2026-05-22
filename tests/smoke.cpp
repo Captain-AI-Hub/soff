@@ -702,7 +702,7 @@ int main()
 
         const auto same_name_count = soff::diff::find_same_name(
             prop_db, prop_matches, prop_primary, prop_secondary, 0.5, true);
-        // Smoke DB has 1 function named "_start" — should match itself
+        // Smoke DB has 1 function named "_start" - should match itself
         assert(same_name_count > 0 || prop_matches.empty());
         // Verify the function doesn't crash and produces valid output
         assert(prop_primary.size() == prop_matches.size());
@@ -710,7 +710,7 @@ int main()
     std::cout << "propagation: find_same_name test passed\n";
 
     // M10: DiffSession with propagation enabled (smoke DB has 1 function,
-    // SQL heuristics already match it, so propagation adds 0 — that's fine for correctness)
+    // SQL heuristics already match it, so propagation adds 0 - that's fine for correctness)
     {
         soff::diff::DiffSessionOptions prop_options;
         prop_options.propagation.enabled = true;

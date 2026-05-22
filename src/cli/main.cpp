@@ -54,6 +54,10 @@ bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, so
             options.sql.enable_experimental = true;
         } else if (option == "--no-slow") {
             options.sql.enable_slow = false;
+        } else if (option == "--relaxed") {
+            options.sql.enable_relaxed_ratio = true;
+        } else if (option == "--ml-model" && i + 1 < argc) {
+            options.ml_model_path = argv[++i];
         } else if (option == "--max-rows" && i + 1 < argc) {
             options.sql.max_processed_rows = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (option == "--timeout" && i + 1 < argc) {

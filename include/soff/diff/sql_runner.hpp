@@ -26,6 +26,7 @@ struct SqlRunnerOptions
     bool enable_unreliable = false;
     bool enable_slow = true;
     bool enable_experimental = false;
+    bool enable_relaxed_ratio = false;
     std::uint32_t timeout_seconds = 300;
     int progress_check_interval = 1000;
     std::function<bool()> cancel_requested;

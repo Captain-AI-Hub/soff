@@ -293,34 +293,48 @@ double deep_ratio_bonus(db::Database& database, const CandidateRow& candidate, b
     const auto& left = main_rows.front();
     const auto& right = diff_rows.front();
     double score = 0.0;
+    // source_file
     if (!left[0].empty() && left[0] == right[0]) {
         score += 0.001;
     }
+    // pseudocode_primes
     if (!left[1].empty() && left[1] == right[1]) {
         score += 0.001;
     }
+    // indegree
     if (left[2] == right[2] && parse_int_or_zero(left[2]) != 0) {
         score += 0.001;
     }
+    // outdegree
     if (left[3] == right[3] && parse_int_or_zero(left[3]) != 0) {
         score += 0.001;
     }
-    if (left[4] == right[4] && left[4] != "[]") {
+    // switches
+    if (left[4] == right[4] && left[4] != "[]" && !left[4].empty()) {
         score += 0.003;
     }
+    // cyclomatic_complexity
     if (left[5] == right[5] && parse_int_or_zero(left[5]) != 0) {
         score += 0.001;
     }
+    // constants: per-constant accumulation (same_cpu: +0.006, diff_cpu: +0.008)
     if (left[6] != "[]" && !left[6].empty() && !right[6].empty()) {
-        const auto common_constants = intersection_size(parse_jsonish_array_values(left[6]), parse_jsonish_array_values(right[6]));
-        score += static_cast<double>(common_constants) * (same_processor ? 0.006 : 0.008);
+        const auto left_consts = parse_jsonish_array_values(left[6]);
+        const auto right_consts = parse_jsonish_array_values(right[6]);
+        const auto common = intersection_size(left_consts, right_consts);
+        score += static_cast<double>(common) * (same_processor ? 0.006 : 0.008);
     }
     return score;
 }
 
-double compute_ratio(db::Database& database, const CandidateRow& candidate, bool same_processor)
+double compute_ratio(db::Database& database, const CandidateRow& candidate, bool same_processor, bool relaxed_ratio = false)
 {
     if (equal_non_empty_ratio(candidate.bytes_hash1, candidate.bytes_hash2) == 1.0) {
+        return 1.0;
+    }
+
+    // In relaxed mode with matching high md_index, accept immediately
+    if (relaxed_ratio && candidate.md1 == candidate.md2 && candidate.md1 > 10.0) {
         return 1.0;
     }
 
@@ -328,7 +342,13 @@ double compute_ratio(db::Database& database, const CandidateRow& candidate, bool
         ? candidate_text_ratio("", "", "", "", "", "", candidate.stripped_pseudocode1, candidate.stripped_pseudocode2)
         : 0.0;
     const double v2 = candidate_text_ratio("", "", "", "", candidate.stripped_assembly1, candidate.stripped_assembly2, "", "");
-    const double v3 = 0.0;
+
+    // v3: AST prime difference ratio
+    double v3 = 0.0;
+    if (!candidate.pseudo_primes1.empty() && !candidate.pseudo_primes2.empty()) {
+        v3 = ast_prime_difference_ratio(candidate.pseudo_primes1, candidate.pseudo_primes2);
+    }
+
     double v4 = 0.0;
     if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
         v4 = std::min((v1 + v2 + v3 + 3.0) / 5.0, 1.0);
@@ -366,7 +386,13 @@ double compute_ratio_fast(const CandidateRow& candidate)
         ? candidate_text_ratio("", "", "", "", "", "", candidate.stripped_pseudocode1, candidate.stripped_pseudocode2)
         : 0.0;
     const double v2 = candidate_text_ratio("", "", "", "", candidate.stripped_assembly1, candidate.stripped_assembly2, "", "");
-    const double v3 = 0.0;
+
+    // v3: AST prime difference ratio
+    double v3 = 0.0;
+    if (!candidate.pseudo_primes1.empty() && !candidate.pseudo_primes2.empty()) {
+        v3 = ast_prime_difference_ratio(candidate.pseudo_primes1, candidate.pseudo_primes2);
+    }
+
     double v4 = 0.0;
     if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
         v4 = std::min((v1 + v2 + v3 + 3.0) / 5.0, 1.0);
@@ -666,6 +692,12 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             }
             auto& candidate = sc.candidate;
             double ratio = sc.ratio;
+
+            // Relaxed ratio: matching high md_index -> accept as 1.0
+            if (options.enable_relaxed_ratio
+                && candidate.md1 == candidate.md2 && candidate.md1 > 10.0) {
+                ratio = 1.0;
+            }
 
             if (heuristic.ratio_mode != RatioMode::no_false_positives && ratio < 1.0 && ratio >= minimum_ratio - 0.05) {
                 const auto bonus = deep_ratio_bonus(database, candidate, options.same_processor);

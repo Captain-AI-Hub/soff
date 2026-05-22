@@ -3,6 +3,7 @@
 
 #include "soff/core/version.hpp"
 #include "soff/core/error.hpp"
+#include "soff/core/hooks.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
 #include "soff/db/repository.hpp"
@@ -12,6 +13,7 @@
 #include "soff/ui/line_diff.hpp"
 
 #include <boost/uuid/detail/md5.hpp>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -38,6 +40,7 @@
 #include <ua.hpp>
 #include <lines.hpp>
 #include <xref.hpp>
+#include <expr.hpp>
 
 #include <algorithm>
 #include <array>
@@ -100,11 +103,12 @@ struct ExportOptions
     bool crash_file_preexisting = false;
     bool resume_existing_database = false;
     bool use_decompiler = true;
+    bool use_microcode = false;
     bool exclude_library_thunk = true;
-    bool ida_subs = true;
     bool ignore_small_functions = false;
     ea_t min_ea = 0;
     ea_t max_ea = BADADDR;
+    soff::ExportHooks* hooks = nullptr;
 };
 
 struct DiffUiOptions
@@ -392,9 +396,10 @@ void save_dialog_options(const std::filesystem::path& output_path, const ExportO
     save_bool_option(node, option_export_use_decompiler, options.use_decompiler);
 
     node.altset(1, options.use_decompiler ? 1 : 0);
-    node.altset(5, options.exclude_library_thunk ? 1 : 0);
-    node.altset(6, options.ida_subs ? 1 : 0);
-    node.altset(7, options.ignore_small_functions ? 1 : 0);
+    // Store bool options as value+1 so 0 means "never saved" (sentinel)
+    node.altset(5, options.exclude_library_thunk ? 2 : 1);
+    node.altset(6, options.use_microcode ? 2 : 1);
+    node.altset(7, options.ignore_small_functions ? 2 : 1);
     node.altset(9, static_cast<nodeidx_t>(options.min_ea));
     node.altset(10, static_cast<nodeidx_t>(options.max_ea));
 }
@@ -413,9 +418,16 @@ void load_dialog_options(std::filesystem::path& output_path, ExportOptions& opti
     if (!load_bool_option(node, option_export_use_decompiler, options.use_decompiler) && node.altval(1) != 0) {
         options.use_decompiler = true;
     }
-    options.exclude_library_thunk = node.altval(5) != 0;
-    options.ida_subs = node.altval(6) != 0;
-    options.ignore_small_functions = node.altval(7) != 0;
+    // Sentinel encoding: 0=never saved (keep default), 1=false, 2=true
+    if (const auto v = node.altval(5); v != 0) {
+        options.exclude_library_thunk = (v == 2);
+    }
+    if (const auto v = node.altval(6); v != 0) {
+        options.use_microcode = (v == 2);
+    }
+    if (const auto v = node.altval(7); v != 0) {
+        options.ignore_small_functions = (v == 2);
+    }
 
     const auto min_ea = node.altval(9);
     const auto max_ea = node.altval(10);
@@ -481,7 +493,6 @@ void apply_env_overrides(ExportOptions& options)
 {
     read_bool_env("DIAPHORA_USE_DECOMPILER", options.use_decompiler);
     read_bool_env("DIAPHORA_EXCLUDE_LIBRARY_THUNK", options.exclude_library_thunk);
-    read_bool_env("DIAPHORA_IDA_SUBS", options.ida_subs);
     read_bool_env("DIAPHORA_IGNORE_SMALL_FUNCTIONS", options.ignore_small_functions);
     read_address_env("DIAPHORA_FROM_ADDRESS", options.min_ea);
     read_address_env("DIAPHORA_TO_ADDRESS", options.max_ea);
@@ -514,18 +525,18 @@ bool ask_export_options(std::filesystem::path& output_path, ExportOptions& optio
 
     ushort checks = 0;
     constexpr ushort check_use_decompiler = 1 << 0;
+    constexpr ushort check_use_microcode = 1 << 1;
     constexpr ushort check_exclude_library_thunk = 1 << 4;
-    constexpr ushort check_ida_subs = 1 << 5;
     constexpr ushort check_ignore_small = 1 << 6;
 
     if (options.use_decompiler) {
         checks |= check_use_decompiler;
     }
+    if (options.use_microcode) {
+        checks |= check_use_microcode;
+    }
     if (options.exclude_library_thunk) {
         checks |= check_exclude_library_thunk;
-    }
-    if (options.ida_subs) {
-        checks |= check_ida_subs;
     }
     if (options.ignore_small_functions) {
         checks |= check_ignore_small;
@@ -543,8 +554,8 @@ bool ask_export_options(std::filesystem::path& output_path, ExportOptions& optio
         "<~F~rom address:$:18:18::> <~T~o address:$:18:18::>\n"
         "\n"
         "<##Options##Use decompiler:C>\n"
+        "<Export microcode (slow):C>\n"
         "<Exclude library/thunk/nullsub:C>\n"
-        "<Export IDA generated sub_/j_ names:C>\n"
         "<Ignore very small functions:C>>\n";
 
     if (ask_form(form, output_buffer, &min_ea, &max_ea, &checks) <= 0) {
@@ -555,8 +566,8 @@ bool ask_export_options(std::filesystem::path& output_path, ExportOptions& optio
     options.min_ea = min_ea;
     options.max_ea = max_ea;
     options.use_decompiler = (checks & check_use_decompiler) != 0;
+    options.use_microcode = (checks & check_use_microcode) != 0;
     options.exclude_library_thunk = (checks & check_exclude_library_thunk) != 0;
-    options.ida_subs = (checks & check_ida_subs) != 0;
     options.ignore_small_functions = (checks & check_ignore_small) != 0;
 
     if (output_path.empty()) {
@@ -1730,6 +1741,23 @@ void append_unique(std::vector<std::string>& values, std::string value)
     }
 }
 
+bool is_valid_constant(std::uint64_t value, ea_t ea)
+{
+    // Filter 1: too small (stack offsets, flags, small immediates)
+    if (value < 0x1000) return false;
+    // Filter 2: powers of 2 (alignment values)
+    if (value != 0 && (value & (value - 1)) == 0) return false;
+    // Filter 3: 0xFFFFFF00-style masks (all-ones with trailing zeros)
+    const auto inverted = ~value;
+    if (inverted != 0 && (inverted & (inverted - 1)) == 0) return false;
+    // Filter 4: has data reference (it's an address, not a constant)
+    if (is_mapped(static_cast<ea_t>(value))) {
+        xrefblk_t xref;
+        if (xref.first_to(static_cast<ea_t>(value), XREF_DATA)) return false;
+    }
+    return true;
+}
+
 void append_instruction_to_block(
     std::vector<soff::BasicBlock>& blocks,
     ea_t ea)
@@ -1841,17 +1869,6 @@ std::string skip_reason_for(func_t* function, const std::string& name, const Exp
     }
     if (function->start_ea < options.min_ea || function->start_ea > options.max_ea) {
         return "outside-range";
-    }
-    if (!options.ida_subs) {
-        if (starts_with(name, "sub_")
-            || starts_with(name, "j_")
-            || starts_with(name, "unknown")
-            || starts_with(name, "nullsub_")) {
-            return "ida-generated-name";
-        }
-        if ((function->flags & FUNC_LIB) != 0) {
-            return "library";
-        }
     }
     if (options.exclude_library_thunk) {
         if ((function->flags & FUNC_LIB) != 0) {
@@ -2203,7 +2220,7 @@ bool has_data_ref_from(ea_t ea)
     return xref.first_from(ea, XREF_DATA);
 }
 
-soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays)
+soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false)
 {
     soff::FunctionFeature feature;
     feature.address = static_cast<soff::Address>(function->start_ea);
@@ -2316,10 +2333,16 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
                 break;
             }
             if (operand.type == o_imm) {
-                append_unique(feature.constants, std::to_string(static_cast<std::uint64_t>(operand.value)));
+                const auto val = static_cast<std::uint64_t>(operand.value);
+                if (is_valid_constant(val, ea)) {
+                    append_unique(feature.constants, std::to_string(val));
+                }
             }
             if (operand.type == o_displ) {
-                append_unique(feature.constants, std::to_string(static_cast<std::uint64_t>(operand.addr)));
+                const auto val = static_cast<std::uint64_t>(operand.addr);
+                if (is_valid_constant(val, ea)) {
+                    append_unique(feature.constants, std::to_string(val));
+                }
             }
         }
 
@@ -2380,9 +2403,20 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     feature.md_index = md_index_for_blocks(feature.blocks, topology);
     feature.bytes_hash = md5_hex(bytes_hash_input);
     feature.function_hash = md5_hex(function_hash_input);
+
+    // Source file from DWARF debug info
+    {
+        const char* src = get_sourcefile(function->start_ea);
+        if (src != nullptr && src[0] != '\0') {
+            feature.source_file = src;
+        }
+    }
+
     if (hexrays != nullptr && hexrays->requested) {
         extract_pseudocode_features(function, feature, *hexrays);
-        extract_microcode_features(function, feature, *hexrays);
+        if (use_microcode) {
+            extract_microcode_features(function, feature, *hexrays);
+        }
     }
     return feature;
 }
@@ -2551,7 +2585,20 @@ ExportResult build_ida_snapshot(
                     "resumed-existing");
                 continue;
             }
-            snapshot.functions.push_back(read_function_feature(function, imagebase, &hexrays));
+            // Export hook: before_export_function
+            if (options.hooks != nullptr) {
+                if (!options.hooks->before_export_function(
+                        static_cast<soff::Address>(function->start_ea), function_name)) {
+                    ++result.stats.skipped_functions;
+                    ++result.stats.skip_reasons["hook-rejected"];
+                    continue;
+                }
+            }
+            snapshot.functions.push_back(read_function_feature(function, imagebase, &hexrays, options.use_microcode));
+            // Export hook: after_export_function
+            if (options.hooks != nullptr) {
+                options.hooks->after_export_function(snapshot.functions.back());
+            }
             if (incremental_save) {
                 pending_functions.push_back(snapshot.functions.back());
                 if (pending_functions.size() >= batch_size) {
@@ -2582,6 +2629,10 @@ ExportResult build_ida_snapshot(
             current_function_name,
             cancellation_requested ? "cancelled" : "failed");
         hide_wait_box();
+        if (options.hooks != nullptr) {
+            options.hooks->on_export_crash(
+                static_cast<soff::Address>(current_function_ea), current_function_name);
+        }
         throw;
     }
     result.stats.export_seconds = std::chrono::duration<double>(
@@ -2608,7 +2659,6 @@ ExportResult build_ida_snapshot(
     append_program_data(snapshot, "export.microcode_failures", "integer", std::to_string(hexrays.microcode_failures));
     append_program_data(snapshot, "export.hexrays_cache_clears", "integer", std::to_string(hexrays.cache_clears));
     append_program_data(snapshot, "export.exclude_library_thunk", "boolean", options.exclude_library_thunk ? "true" : "false");
-    append_program_data(snapshot, "export.ida_subs", "boolean", options.ida_subs ? "true" : "false");
     append_program_data(snapshot, "export.ignore_small_functions", "boolean", options.ignore_small_functions ? "true" : "false");
     append_program_data(snapshot, "export.min_ea", "address", std::to_string(static_cast<soff::Address>(options.min_ea)));
     append_program_data(snapshot, "export.max_ea", "address", std::to_string(static_cast<soff::Address>(options.max_ea)));
@@ -2633,8 +2683,34 @@ ExportResult build_ida_snapshot(
     }
     export_local_types(snapshot);
 
+    // Compute callgraph primes after all functions are collected
+    {
+        boost::unordered_flat_set<soff::Address> callgraph_participants;
+        for (const auto& f : snapshot.functions) {
+            for (const auto& ref : f.call_references) {
+                callgraph_participants.insert(f.address);
+                callgraph_participants.insert(ref.address);
+            }
+        }
+        std::string cg_primes = "1";
+        std::string cg_all_primes = "1";
+        for (const auto& f : snapshot.functions) {
+            if (f.primes_value.empty() || f.primes_value == "0") continue;
+            const auto prime_val = std::stoull(f.primes_value);
+            if (prime_val <= 1) continue;
+            cg_all_primes = decimal_multiply(std::move(cg_all_primes), prime_val);
+            if (callgraph_participants.contains(f.address)) {
+                cg_primes = decimal_multiply(std::move(cg_primes), prime_val);
+            }
+        }
+        snapshot.callgraph_primes = std::move(cg_primes);
+        snapshot.callgraph_all_primes = std::move(cg_all_primes);
+    }
+
     if (incremental_save) {
         repository.replace_program_data(snapshot.program_data, *output_path);
+        repository.update_callgraph_primes(snapshot.callgraph_primes, snapshot.callgraph_all_primes, *output_path);
+        repository.save_compilation_units(*output_path);
         repository.finalize_incremental_save(*output_path);
         if (result.stats.resumed_functions != 0) {
             result.snapshot = repository.load(*output_path);
@@ -2830,6 +2906,7 @@ struct ImportApplySummary
     std::size_t pseudocode_comments = 0;
     std::size_t type_libraries = 0;
     std::size_t type_definitions = 0;
+    std::size_t global_variables = 0;
     std::size_t missing_function = 0;
     std::size_t failed = 0;
 };
@@ -5283,6 +5360,38 @@ bool apply_pseudocode_comment(ea_t address, std::uint64_t pseudoitp, const std::
     return true;
 }
 
+void import_global_variables(func_t* function, soff::Address /*secondary_addr*/, ImportApplySummary& summary)
+{
+    // Scan data references from the function and rename globals that have
+    // meaningful names in the secondary (imported via the function's xrefs)
+    xrefblk_t xref;
+    for (bool has = xref.first_from(function->start_ea, XREF_DATA);
+         has;
+         has = xref.next_from()) {
+        if (xref.iscode) continue;
+        const ea_t target = xref.to;
+        // Skip if target is inside a function (local variable, not global)
+        if (get_func(target) != nullptr) continue;
+        // Skip if already has a meaningful name
+        qstring existing_name;
+        if (get_name(&existing_name, target) > 0 && existing_name.length() > 0) {
+            const auto sv = std::string_view(existing_name.c_str());
+            if (sv.substr(0, 4) != "unk_" && sv.substr(0, 5) != "byte_"
+                && sv.substr(0, 5) != "word_" && sv.substr(0, 6) != "dword_"
+                && sv.substr(0, 6) != "qword_") {
+                continue; // already named
+            }
+        }
+        // Try to get name from debug info
+        qstring demangled;
+        if (get_demangled_name(&demangled, target, 0, GN_SHORT) > 0 && demangled.length() > 0) {
+            if (set_name(target, demangled.c_str(), SN_CHECK | SN_NOWARN)) {
+                ++summary.global_variables;
+            }
+        }
+    }
+}
+
 ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
 {
     ImportApplySummary summary;
@@ -5311,6 +5420,10 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
                 ++summary.renamed;
             } else {
                 ++summary.failed;
+            }
+            // Import global variable names referenced by this function
+            if (item.secondary_address != 0) {
+                import_global_variables(function, item.secondary_address, summary);
             }
             break;
         }
@@ -6256,10 +6369,236 @@ struct local_diff_handler_t : public action_handler_t
     }
 };
 
+// IDC function: soff_export(output_path) -> JSON string
+static error_t idaapi idc_soff_export(idc_value_t* argv, idc_value_t* res)
+{
+    const std::filesystem::path output_path(argv[0].c_str());
+    ExportOptions options;
+    options.use_decompiler = true;
+    try {
+        const auto result = build_ida_snapshot(options, nullptr, &output_path);
+        std::ostringstream json;
+        json << "{\"exported\":" << result.stats.exported_functions
+             << ",\"skipped\":" << result.stats.skipped_functions
+             << ",\"total\":" << result.stats.total_functions
+             << ",\"output\":\"" << output_path.string() << "\"}";
+        res->set_string(json.str().c_str());
+    } catch (const std::exception& e) {
+        res->set_string((std::string("{\"error\":\"") + e.what() + "\"}").c_str());
+    }
+    return eOk;
+}
+
+// IDC function: soff_diff(main_db, diff_db, result_db) -> JSON string
+static error_t idaapi idc_soff_diff(idc_value_t* argv, idc_value_t* res)
+{
+    DiffUiOptions options;
+    options.main_db = argv[0].c_str();
+    options.diff_db = argv[1].c_str();
+    options.result_db = argv[2].c_str();
+    try {
+        const auto summary = diff_databases(options);
+        std::ostringstream json;
+        json << "{\"best\":" << summary.results.best
+             << ",\"partial\":" << summary.results.partial
+             << ",\"unreliable\":" << summary.results.unreliable
+             << ",\"unmatched_primary\":" << summary.results.unmatched_primary
+             << ",\"unmatched_secondary\":" << summary.results.unmatched_secondary
+             << ",\"output\":\"" << options.result_db << "\"}";
+        res->set_string(json.str().c_str());
+    } catch (const std::exception& e) {
+        res->set_string((std::string("{\"error\":\"") + e.what() + "\"}").c_str());
+    }
+    return eOk;
+}
+
+// Helper: split text by newlines into vector of lines
+static std::vector<std::string> split_lines(const std::string& text)
+{
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
+// Helper: format line diff entries as unified patch text
+static std::string format_unified_diff(
+    const std::vector<std::string>& left,
+    const std::vector<std::string>& right,
+    const std::vector<soff::ui::DiffEntry>& entries)
+{
+    std::ostringstream out;
+    for (const auto& entry : entries) {
+        switch (entry.kind) {
+        case soff::ui::DiffEntry::same:
+            out << ' ' << left[entry.left_index] << '\n';
+            break;
+        case soff::ui::DiffEntry::removed:
+            out << '-' << left[entry.left_index] << '\n';
+            break;
+        case soff::ui::DiffEntry::added:
+            out << '+' << right[entry.right_index] << '\n';
+            break;
+        }
+    }
+    return out.str();
+}
+
+// Helper: query a column from functions table by address
+static std::string query_function_column(
+    const std::string& db_path,
+    const std::string& address,
+    const std::string& column)
+{
+    soff::db::Database db;
+    db.open(std::filesystem::path(db_path));
+    const auto rows = db.query_rows(
+        "select " + column + " from functions where address = '"
+        + address + "' limit 1");
+    if (rows.empty() || rows[0].empty()) return {};
+    return rows[0][0];
+}
+
+// IDC: soff_diff_asm(main_db, diff_db, primary_addr, secondary_addr)
+static error_t idaapi idc_soff_diff_asm(idc_value_t* argv, idc_value_t* res)
+{
+    try {
+        const std::string main_db = argv[0].c_str();
+        const std::string diff_db = argv[1].c_str();
+        const std::string primary_addr = argv[2].c_str();
+        const std::string secondary_addr = argv[3].c_str();
+
+        const auto left_text = query_function_column(main_db, primary_addr, "assembly");
+        const auto right_text = query_function_column(diff_db, secondary_addr, "assembly");
+
+        const auto left_lines = split_lines(left_text);
+        const auto right_lines = split_lines(right_text);
+        const auto diff = soff::ui::compute_line_diff(left_lines, right_lines);
+        res->set_string(format_unified_diff(left_lines, right_lines, diff).c_str());
+    } catch (const std::exception& e) {
+        res->set_string((std::string("-error: ") + e.what()).c_str());
+    }
+    return eOk;
+}
+
+// IDC: soff_diff_pseudo(main_db, diff_db, primary_addr, secondary_addr)
+static error_t idaapi idc_soff_diff_pseudo(idc_value_t* argv, idc_value_t* res)
+{
+    try {
+        const std::string main_db = argv[0].c_str();
+        const std::string diff_db = argv[1].c_str();
+        const std::string primary_addr = argv[2].c_str();
+        const std::string secondary_addr = argv[3].c_str();
+
+        const auto left_text = query_function_column(main_db, primary_addr, "pseudocode");
+        const auto right_text = query_function_column(diff_db, secondary_addr, "pseudocode");
+
+        const auto left_lines = split_lines(left_text);
+        const auto right_lines = split_lines(right_text);
+        const auto diff = soff::ui::compute_line_diff(left_lines, right_lines);
+        res->set_string(format_unified_diff(left_lines, right_lines, diff).c_str());
+    } catch (const std::exception& e) {
+        res->set_string((std::string("-error: ") + e.what()).c_str());
+    }
+    return eOk;
+}
+
+static const char idc_soff_export_args[] = { VT_STR, 0 };
+static const ext_idcfunc_t idc_soff_export_desc = {
+    "soff_export", idc_soff_export, idc_soff_export_args, nullptr, 0, EXTFUN_BASE
+};
+static const char idc_soff_diff_args[] = { VT_STR, VT_STR, VT_STR, 0 };
+static const ext_idcfunc_t idc_soff_diff_desc = {
+    "soff_diff", idc_soff_diff, idc_soff_diff_args, nullptr, 0, EXTFUN_BASE
+};
+static const char idc_soff_diff_asm_args[] = { VT_STR, VT_STR, VT_STR, VT_STR, 0 };
+static const ext_idcfunc_t idc_soff_diff_asm_desc = {
+    "soff_diff_asm", idc_soff_diff_asm, idc_soff_diff_asm_args, nullptr, 0, EXTFUN_BASE
+};
+static const char idc_soff_diff_pseudo_args[] = { VT_STR, VT_STR, VT_STR, VT_STR, 0 };
+static const ext_idcfunc_t idc_soff_diff_pseudo_desc = {
+    "soff_diff_pseudo", idc_soff_diff_pseudo, idc_soff_diff_pseudo_args, nullptr, 0, EXTFUN_BASE
+};
+
+void run_auto_mode()
+{
+    msg("Soff: DIAPHORA_AUTO mode activated\n");
+
+    // Determine export path
+    std::filesystem::path export_path;
+    if (const char* env_out = env_value("DIAPHORA_EXPORT_FILE")) {
+        export_path = env_out;
+    } else {
+        export_path = default_export_path();
+    }
+    if (export_path.empty()) {
+        msg("Soff: DIAPHORA_AUTO: cannot determine export path\n");
+        return;
+    }
+
+    // Export
+    ExportOptions options;
+    options.use_decompiler = true;
+    apply_env_overrides(options);
+    try {
+        const auto result = build_ida_snapshot(options, nullptr, &export_path);
+        msg("Soff: DIAPHORA_AUTO: exported %zu/%zu functions to %s\n",
+            result.stats.exported_functions,
+            result.stats.total_functions,
+            export_path.string().c_str());
+    } catch (const std::exception& e) {
+        msg("Soff: DIAPHORA_AUTO: export failed: %s\n", e.what());
+        qexit(1);
+        return;
+    }
+
+    // Optional auto diff
+    if (env_value("DIAPHORA_AUTO_DIFF")) {
+        DiffUiOptions diff_options;
+        diff_options.main_db = export_path.string();
+        if (const char* db1 = env_value("DIAPHORA_DB1")) {
+            diff_options.main_db = db1;
+        }
+        if (const char* db2 = env_value("DIAPHORA_DB2")) {
+            diff_options.diff_db = db2;
+        } else {
+            diff_options.diff_db = export_path.string();
+        }
+        if (const char* out = env_value("DIAPHORA_DIFF_OUT")) {
+            diff_options.result_db = out;
+        } else {
+            diff_options.result_db = std::filesystem::path(diff_options.main_db).replace_extension(".diaphora").string();
+        }
+        apply_diff_env_overrides(diff_options);
+
+        try {
+            const auto summary = diff_databases(diff_options);
+            msg("Soff: DIAPHORA_AUTO_DIFF: best=%zu partial=%zu unreliable=%zu unmatched=%zu/%zu\n",
+                summary.results.best, summary.results.partial, summary.results.unreliable,
+                summary.results.unmatched_primary, summary.results.unmatched_secondary);
+        } catch (const std::exception& e) {
+            msg("Soff: DIAPHORA_AUTO_DIFF: diff failed: %s\n", e.what());
+            qexit(1);
+            return;
+        }
+    }
+
+    msg("Soff: DIAPHORA_AUTO: done, requesting exit\n");
+    qexit(0);
+}
+
 struct soff_plugin_t : public plugmod_t
 {
     soff_plugin_t()
     {
+        add_idc_func(idc_soff_export_desc);
+        add_idc_func(idc_soff_diff_desc);
+        add_idc_func(idc_soff_diff_asm_desc);
+        add_idc_func(idc_soff_diff_pseudo_desc);
+
         menu_created_ = create_menu(menu_id, menu_label, "Options");
         if (!menu_created_) {
             msg("Soff: failed to create top-level menu %s\n", menu_label);
@@ -6458,10 +6797,20 @@ struct soff_plugin_t : public plugmod_t
             delete local_diff_handler;
             msg("Soff: failed to register action %s\n", local_diff_action_name);
         }
+
+        // DIAPHORA_AUTO: headless export (and optional diff) on plugin load
+        if (env_value("DIAPHORA_AUTO")) {
+            run_auto_mode();
+        }
     }
 
     ~soff_plugin_t() override
     {
+        del_idc_func("soff_export");
+        del_idc_func("soff_diff");
+        del_idc_func("soff_diff_asm");
+        del_idc_func("soff_diff_pseudo");
+
         if (local_diff_registered_) {
             detach_action_from_menu(local_diff_menu_path, local_diff_action_name);
             detach_action_from_menu(menu_path, local_diff_action_name);

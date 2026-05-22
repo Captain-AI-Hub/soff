@@ -64,4 +64,32 @@ public:
     virtual void on_finish() {}
 };
 
+/// Export phase hooks - called during IDB export
+class ExportHooks
+{
+public:
+    virtual ~ExportHooks() = default;
+
+    /// Called before exporting a function. Return false to skip this function.
+    virtual bool before_export_function(Address ea, std::string_view name)
+    {
+        (void)ea;
+        (void)name;
+        return true;
+    }
+
+    /// Called after a function is exported. Can modify the feature before it's saved.
+    virtual void after_export_function(FunctionFeature& feature)
+    {
+        (void)feature;
+    }
+
+    /// Called if the export crashes or is cancelled.
+    virtual void on_export_crash(Address last_ea, std::string_view last_name)
+    {
+        (void)last_ea;
+        (void)last_name;
+    }
+};
+
 } // namespace soff

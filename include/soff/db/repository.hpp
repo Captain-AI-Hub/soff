@@ -33,6 +33,7 @@ public:
     void begin_incremental_save(const ProgramSnapshot& snapshot, const std::filesystem::path& path, bool replace) const;
     void append_functions(const std::vector<FunctionFeature>& functions, const std::filesystem::path& path) const;
     void replace_program_data(const std::vector<ProgramDataItem>& program_data, const std::filesystem::path& path) const;
+    void update_callgraph_primes(const std::string& primes, const std::string& all_primes, const std::filesystem::path& path) const;
     void finalize_incremental_save(const std::filesystem::path& path) const;
     void save_compilation_units(const std::filesystem::path& path) const;
     ProgramSnapshot load(const std::filesystem::path& path) const;

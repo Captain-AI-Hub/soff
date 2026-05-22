@@ -528,6 +528,18 @@ void SnapshotRepository::replace_program_data(
     }
 }
 
+void SnapshotRepository::update_callgraph_primes(
+    const std::string& primes,
+    const std::string& all_primes,
+    const std::filesystem::path& path) const
+{
+    db::Database database;
+    database.open(path);
+    database.execute(
+        "update program set callgraph_primes = ?, callgraph_all_primes = ?",
+        {primes, all_primes});
+}
+
 void SnapshotRepository::finalize_incremental_save(const std::filesystem::path& path) const
 {
     create_indices(path);
@@ -592,6 +604,8 @@ ProgramSnapshot SnapshotRepository::load(const std::filesystem::path& path) cons
 
     ProgramSnapshot snapshot;
     snapshot.architecture = database.query_text("select processor from program limit 1");
+    snapshot.callgraph_primes = database.query_text("select coalesce(callgraph_primes,'') from program limit 1");
+    snapshot.callgraph_all_primes = database.query_text("select coalesce(callgraph_all_primes,'') from program limit 1");
     snapshot.input_path = path.string();
 
     const auto data_rows = database.query_rows("select name, type, value from program_data order by id");

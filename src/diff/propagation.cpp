@@ -1,4 +1,5 @@
 #include "soff/diff/propagation.hpp"
+#include "soff/diff/ratio.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -82,7 +83,9 @@ std::size_t find_same_name(
         "select f.address, f.name, df.address, df.name, f.nodes, df.nodes, "
         "f.clean_assembly, df.clean_assembly, f.clean_pseudo, df.clean_pseudo "
         "from functions f, diff.functions df "
-        "where f.name = df.name and f.name not like 'sub_%' "
+        "where (f.name = df.name or (f.mangled_function = df.mangled_function "
+        "and f.mangled_function != '' and f.mangled_function is not null)) "
+        "and f.name not like 'sub_%' "
         "and f.name not like 'nullsub_%' "
         "and f.name not like 'j_%' "
         "and f.name != 'unknown' "
@@ -280,7 +283,31 @@ std::size_t find_matches_diffing(
                 if (matched_primary.find(addr_p) != matched_primary.end()) continue;
                 if (matched_secondary.find(addr_s) != matched_secondary.end()) continue;
 
+                // Node count filter: reject if size difference > 75%
+                const auto nodes_p = parse_int_safe(lookup_p.front()[2]);
+                const auto nodes_s = parse_int_safe(lookup_s.front()[2]);
+                if (nodes_p > 0 && nodes_s > 0) {
+                    const auto min_n = std::min(nodes_p, nodes_s);
+                    const auto max_n = std::max(nodes_p, nodes_s);
+                    if (max_n > 0 && min_n * 100 / max_n < 25) continue;
+                }
+                if (nodes_p < 3 && nodes_s < 3) continue;
+
+                // Compute real text ratio
                 double ratio = 0.6;
+                const auto text_p = database.query_rows(
+                    "select clean_assembly, clean_pseudo from functions where address = '"
+                    + std::to_string(addr_p) + "' limit 1");
+                const auto text_s = database.query_rows(
+                    "select clean_assembly, clean_pseudo from diff.functions where address = '"
+                    + std::to_string(addr_s) + "' limit 1");
+                if (!text_p.empty() && !text_s.empty() && text_p.front().size() >= 2 && text_s.front().size() >= 2) {
+                    const auto& tp = text_p.front();
+                    const auto& ts = text_s.front();
+                    const double r = diff::candidate_text_ratio(
+                        "", "", "", "", tp[0], ts[0], tp[1], ts[1]);
+                    if (r > ratio) ratio = r;
+                }
                 if (ratio + bonus_ratio < 1.0) ratio += bonus_ratio;
 
                 db::ResultMatch new_match;
@@ -291,12 +318,111 @@ std::size_t find_matches_diffing(
                 new_match.secondary = addr_s;
                 new_match.secondary_name = lookup_s.front()[1];
                 new_match.ratio = ratio;
-                new_match.primary_nodes = parse_int_safe(lookup_p.front()[2]);
-                new_match.secondary_nodes = parse_int_safe(lookup_s.front()[2]);
+                new_match.primary_nodes = nodes_p;
+                new_match.secondary_nodes = nodes_s;
                 new_match.description = "Matches diffing";
                 matches.push_back(std::move(new_match));
                 matched_primary.insert(addr_p);
                 matched_secondary.insert(addr_s);
+                ++added;
+                break;
+            }
+        }
+
+        // Phase 2: diff-based rename detection
+        // Compare text lines to find names unique to each side (renamed functions)
+        const auto& text_p = rows_p.front()[0];
+        const auto& text_s = rows_s.front()[0];
+        if (text_p.empty() || text_s.empty()) continue;
+
+        // Extract function-like names from each side's text
+        auto extract_called_names = [](const std::string& text) {
+            boost::unordered_flat_set<std::string> names;
+            // Simple heuristic: find "call xxx" or "bl xxx" patterns
+            std::size_t pos = 0;
+            while (pos < text.size()) {
+                const auto nl = text.find('\n', pos);
+                const auto line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+                pos = nl == std::string::npos ? text.size() : nl + 1;
+                // Look for call-like instructions
+                const auto call_pos = line.find("call ");
+                if (call_pos != std::string::npos) {
+                    auto name_start = call_pos + 5;
+                    while (name_start < line.size() && line[name_start] == ' ') ++name_start;
+                    auto name_end = name_start;
+                    while (name_end < line.size() && line[name_end] != ' ' && line[name_end] != ';' && line[name_end] != '\n') ++name_end;
+                    if (name_end > name_start) {
+                        auto n = line.substr(name_start, name_end - name_start);
+                        if (n.size() > 3 && n.substr(0, 4) != "sub_" && n.substr(0, 4) != "loc_") {
+                            names.insert(std::move(n));
+                        }
+                    }
+                }
+            }
+            return names;
+        };
+
+        const auto calls_p = extract_called_names(text_p);
+        const auto calls_s = extract_called_names(text_s);
+
+        // Names only in primary (removed) paired with names only in secondary (added)
+        std::vector<std::string> only_p, only_s;
+        for (const auto& n : calls_p) {
+            if (!calls_s.contains(n)) only_p.push_back(n);
+        }
+        for (const auto& n : calls_s) {
+            if (!calls_p.contains(n)) only_s.push_back(n);
+        }
+
+        // Try to match renamed pairs
+        for (const auto& pn : only_p) {
+            for (const auto& sn : only_s) {
+                const auto lookup_p2 = database.query_rows(
+                    "select address, name, nodes from functions where name = '" + pn + "' limit 1");
+                const auto lookup_s2 = database.query_rows(
+                    "select address, name, nodes from diff.functions where name = '" + sn + "' limit 1");
+                if (lookup_p2.empty() || lookup_s2.empty()) continue;
+                if (lookup_p2.front().size() < 3 || lookup_s2.front().size() < 3) continue;
+
+                const auto addr_p2 = parse_addr(lookup_p2.front()[0]);
+                const auto addr_s2 = parse_addr(lookup_s2.front()[0]);
+                if (matched_primary.contains(addr_p2)) continue;
+                if (matched_secondary.contains(addr_s2)) continue;
+
+                const auto nodes_p2 = parse_int_safe(lookup_p2.front()[2]);
+                const auto nodes_s2 = parse_int_safe(lookup_s2.front()[2]);
+                if (nodes_p2 < 3 && nodes_s2 < 3) continue;
+
+                // Compute ratio for the renamed pair
+                double ratio = 0.5;
+                const auto tp2 = database.query_rows(
+                    "select clean_assembly, clean_pseudo from functions where address = '"
+                    + std::to_string(addr_p2) + "' limit 1");
+                const auto ts2 = database.query_rows(
+                    "select clean_assembly, clean_pseudo from diff.functions where address = '"
+                    + std::to_string(addr_s2) + "' limit 1");
+                if (!tp2.empty() && !ts2.empty() && tp2.front().size() >= 2 && ts2.front().size() >= 2) {
+                    const double r = diff::candidate_text_ratio(
+                        "", "", "", "", tp2.front()[0], ts2.front()[0], tp2.front()[1], ts2.front()[1]);
+                    if (r > ratio) ratio = r;
+                }
+                if (ratio < min_ratio) continue;
+                if (ratio + bonus_ratio < 1.0) ratio += bonus_ratio;
+
+                db::ResultMatch new_match;
+                new_match.kind = db::ResultKind::partial;
+                new_match.line = static_cast<int>(matches.size());
+                new_match.primary = addr_p2;
+                new_match.primary_name = lookup_p2.front()[1];
+                new_match.secondary = addr_s2;
+                new_match.secondary_name = lookup_s2.front()[1];
+                new_match.ratio = ratio;
+                new_match.primary_nodes = nodes_p2;
+                new_match.secondary_nodes = nodes_s2;
+                new_match.description = "Matches diffing (renamed)";
+                matches.push_back(std::move(new_match));
+                matched_primary.insert(addr_p2);
+                matched_secondary.insert(addr_s2);
                 ++added;
                 break;
             }
@@ -345,6 +471,20 @@ std::size_t find_related_constants(
         if (shared.empty()) continue;
 
         for (const auto& constant : shared) {
+            // Frequency filter: skip constants referenced by too many functions
+            const auto freq_p = database.query_rows(
+                "select count(distinct func_id) from constants where constant = '"
+                + constant + "'");
+            const auto freq_s = database.query_rows(
+                "select count(distinct func_id) from diff.constants where constant = '"
+                + constant + "'");
+            if (!freq_p.empty() && !freq_p.front().empty()) {
+                if (parse_int_safe(freq_p.front()[0]) > 512) continue;
+            }
+            if (!freq_s.empty() && !freq_s.front().empty()) {
+                if (parse_int_safe(freq_s.front()[0]) > 512) continue;
+            }
+
             const auto funcs_p = database.query_rows(
                 "select distinct func_id from constants where constant = '"
                 + constant + "'");
@@ -423,11 +563,18 @@ PropagationStats run_propagation(
         stats.diffing_matches += diffing;
         round_added += diffing;
 
-        const auto related = find_related_constants(
-            database, matches, matched_primary, matched_secondary,
-            options.related_min_ratio);
+        const auto related = options.enable_slow
+            ? find_related_constants(
+                database, matches, matched_primary, matched_secondary,
+                options.related_min_ratio)
+            : 0;
         stats.related_constants_matches += related;
         round_added += related;
+
+        const auto cu_matches = find_compilation_unit_matches(
+            database, matches, matched_primary, matched_secondary,
+            options.same_name_min_ratio, options.same_processor);
+        round_added += cu_matches;
 
         const auto affine = find_locally_affine_functions(
             database, matches, matched_primary, matched_secondary,
@@ -441,6 +588,81 @@ PropagationStats run_propagation(
     }
 
     return stats;
+}
+
+std::size_t find_compilation_unit_matches(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    bool same_processor)
+{
+    // Find CU names that exist in both databases
+    const auto cu_rows = database.query_rows(
+        "select cu.name from compilation_units cu "
+        "inner join diff.compilation_units dcu on cu.name = dcu.name "
+        "where cu.name != ''");
+    if (cu_rows.empty()) return 0;
+
+    std::size_t added = 0;
+    for (const auto& cu_row : cu_rows) {
+        if (cu_row.empty()) continue;
+        const auto& cu_name = cu_row[0];
+
+        // Get unmatched functions in this CU from both sides
+        const auto primary_funcs = database.query_rows(
+            "select f.address, f.name, f.nodes, f.clean_assembly, f.clean_pseudo "
+            "from functions f "
+            "inner join compilation_unit_functions cuf on cuf.address = f.address "
+            "inner join compilation_units cu on cu.id = cuf.cu_id "
+            "where cu.name = '" + cu_name + "'");
+        const auto secondary_funcs = database.query_rows(
+            "select f.address, f.name, f.nodes, f.clean_assembly, f.clean_pseudo "
+            "from diff.functions f "
+            "inner join diff.compilation_unit_functions cuf on cuf.address = f.address "
+            "inner join diff.compilation_units cu on cu.id = cuf.cu_id "
+            "where cu.name = '" + cu_name + "'");
+
+        for (const auto& pf : primary_funcs) {
+            if (pf.size() < 5) continue;
+            const auto addr_p = parse_addr(pf[0]);
+            if (matched_primary.contains(addr_p)) continue;
+            const auto& name_p = pf[1];
+            if (name_p.empty()) continue;
+
+            for (const auto& sf : secondary_funcs) {
+                if (sf.size() < 5) continue;
+                const auto addr_s = parse_addr(sf[0]);
+                if (matched_secondary.contains(addr_s)) continue;
+                if (sf[1] != name_p) continue;
+
+                // Same name in same CU - compute ratio
+                double ratio = candidate_text_ratio(
+                    "", "", "", "", pf[3], sf[3], pf[4], sf[4]);
+                if (ratio < min_ratio) continue;
+                if (ratio + 0.01 < 1.0) ratio += 0.01;
+
+                db::ResultMatch match;
+                match.kind = db::ResultKind::partial;
+                match.line = static_cast<int>(matches.size());
+                match.primary = addr_p;
+                match.primary_name = name_p;
+                match.secondary = addr_s;
+                match.secondary_name = sf[1];
+                match.ratio = ratio;
+                match.primary_nodes = parse_int_safe(pf[2]);
+                match.secondary_nodes = parse_int_safe(sf[2]);
+                match.description = "Same compilation unit";
+                matches.push_back(std::move(match));
+                matched_primary.insert(addr_p);
+                matched_secondary.insert(addr_s);
+                ++added;
+                break;
+            }
+        }
+    }
+    return added;
 }
 
 } // namespace soff::diff
