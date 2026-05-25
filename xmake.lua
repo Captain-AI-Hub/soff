@@ -39,6 +39,19 @@ target("soff_smoke")
     add_deps("soff_core")
     add_files("tests/*.cpp")
 
+target("soff_ffi")
+    set_kind("shared")
+    add_deps("soff_core")
+    add_files("src/ffi/*.cpp")
+    if is_plat("windows") then
+        set_filename("soff_ffi.dll")
+    elseif is_plat("linux") then
+        set_filename("libsoff_ffi.so")
+        add_cxflags("-fPIC")
+    elseif is_plat("macosx") then
+        set_filename("libsoff_ffi.dylib")
+    end
+
 if has_config("ida_plugin") then
     local ida_sdk = path.join("$(projectdir)", get_config("ida_sdk"))
 

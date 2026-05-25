@@ -39,12 +39,13 @@ void print_usage()
         << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>]\n";
 }
 
-bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, soff::diff::DiffSessionOptions& options)
+bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, soff::diff::DiffSessionOptions& options, bool& progress)
 {
     if (argc < 6 || std::string_view(argv[4]) != "--out") {
         return false;
     }
 
+    progress = false;
     output = argv[5];
     for (int i = 6; i < argc; ++i) {
         const std::string_view option(argv[i]);
@@ -62,6 +63,8 @@ bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, so
             options.sql.max_processed_rows = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (option == "--timeout" && i + 1 < argc) {
             options.sql.timeout_seconds = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (option == "--progress") {
+            progress = true;
         } else {
             return false;
         }
@@ -953,33 +956,87 @@ int main(int argc, char** argv)
             const std::filesystem::path diff_db(argv[3]);
             std::filesystem::path out_db;
             soff::diff::DiffSessionOptions options;
-            if (!parse_diff_options(argc, argv, out_db, options)) {
+            bool progress = false;
+            if (!parse_diff_options(argc, argv, out_db, options, progress)) {
                 print_usage();
                 return 2;
             }
+
+            struct CliProgressHooks : soff::DiffHooks
+            {
+                std::size_t index = 0;
+                std::size_t total = 0;
+                std::size_t matches = 0;
+
+                std::optional<std::string> on_launch_heuristic(
+                    std::string_view name, std::string_view sql) override
+                {
+                    ++index;
+                    std::cout << "{\"phase\":\"heuristic\",\"index\":" << index
+                              << ",\"total\":" << total
+                              << ",\"matches\":" << matches
+                              << ",\"name\":\"" << name << "\"}" << std::endl;
+                    return std::string(sql);
+                }
+
+                soff::MatchDecision on_match(const soff::MatchContext& ctx) override
+                {
+                    ++matches;
+                    return {true, ctx.ratio};
+                }
+            };
+
+            CliProgressHooks progress_hooks;
+            if (progress) {
+                const auto& h = soff::diff::builtin_heuristics();
+                progress_hooks.total = h.size();
+                options.hooks = &progress_hooks;
+                std::cout << "{\"phase\":\"validate\",\"step\":\"primary\"}" << std::endl;
+            }
+
             if (const auto error = validate_export_database(main_db, "main"); !error.empty()) {
                 throw std::runtime_error(error);
             }
+
+            if (progress) {
+                std::cout << "{\"phase\":\"validate\",\"step\":\"secondary\"}" << std::endl;
+            }
+
             if (const auto error = validate_export_database(diff_db, "diff"); !error.empty()) {
                 throw std::runtime_error(error);
             }
 
+            if (progress) {
+                std::cout << "{\"phase\":\"running\"}" << std::endl;
+            }
+
             const auto summary = soff::diff::DiffSession{options}.run_all(main_db, diff_db, out_db);
-            std::cout << "heuristics=" << summary.heuristics
-                      << " same_processor=" << (summary.same_processor ? "yes" : "no")
-                      << " candidates=" << summary.candidates
-                      << " accepted=" << summary.accepted
-                      << " multimatches=" << summary.multimatches
-                      << " best=" << summary.results.best
-                      << " partial=" << summary.results.partial
-                      << " unreliable=" << summary.results.unreliable
-                      << " result_multimatch=" << summary.results.multimatch
-                      << " unmatched_primary=" << summary.results.unmatched_primary
-                      << " unmatched_secondary=" << summary.results.unmatched_secondary
-                      << " row_limited=" << summary.row_limited_heuristics
-                      << " timed_out=" << summary.timed_out_heuristics
-                      << " cancelled=" << summary.cancelled_heuristics
-                      << " out=" << out_db.string() << '\n';
+
+            if (progress) {
+                std::cout << "{\"phase\":\"done\""
+                          << ",\"best\":" << summary.results.best
+                          << ",\"partial\":" << summary.results.partial
+                          << ",\"unreliable\":" << summary.results.unreliable
+                          << ",\"unmatched_primary\":" << summary.results.unmatched_primary
+                          << ",\"unmatched_secondary\":" << summary.results.unmatched_secondary
+                          << ",\"out\":\"" << out_db.string() << "\"}" << std::endl;
+            } else {
+                std::cout << "heuristics=" << summary.heuristics
+                          << " same_processor=" << (summary.same_processor ? "yes" : "no")
+                          << " candidates=" << summary.candidates
+                          << " accepted=" << summary.accepted
+                          << " multimatches=" << summary.multimatches
+                          << " best=" << summary.results.best
+                          << " partial=" << summary.results.partial
+                          << " unreliable=" << summary.results.unreliable
+                          << " result_multimatch=" << summary.results.multimatch
+                          << " unmatched_primary=" << summary.results.unmatched_primary
+                          << " unmatched_secondary=" << summary.results.unmatched_secondary
+                          << " row_limited=" << summary.row_limited_heuristics
+                          << " timed_out=" << summary.timed_out_heuristics
+                          << " cancelled=" << summary.cancelled_heuristics
+                          << " out=" << out_db.string() << '\n';
+            }
             return 0;
         }
 

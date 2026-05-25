@@ -234,6 +234,127 @@ fn get_analyze_stats(path: String) -> Result<AnalyzeStats, String> {
     })
 }
 
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+
+#[repr(C)]
+struct SoffDiffOptions {
+    enable_slow: c_int,
+    enable_unreliable: c_int,
+    enable_experimental: c_int,
+    max_rows: u32,
+    timeout_seconds: u32,
+}
+
+type SoffProgressFn = extern "C" fn(*const c_char, *mut c_void);
+
+fn find_soff_ffi_path() -> Result<std::path::PathBuf, String> {
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("no parent dir")?
+        .to_path_buf();
+
+    let name = if cfg!(windows) { "soff_ffi.dll" }
+        else if cfg!(target_os = "macos") { "libsoff_ffi.dylib" }
+        else { "libsoff_ffi.so" };
+
+    let candidate = exe_dir.join(name);
+    if candidate.exists() { return Ok(candidate); }
+
+    let resources = exe_dir.join("resources").join(name);
+    if resources.exists() { return Ok(resources); }
+
+    // Dev: xmake build output
+    let dev_candidates = [
+        exe_dir.join("../../../../build/windows/x64/release").join(name),
+        exe_dir.join("../../../../build/linux/x86_64/release").join(name),
+        exe_dir.join("../../../../build/macosx/arm64/release").join(name),
+        exe_dir.join("../../../../build/macosx/x86_64/release").join(name),
+    ];
+    for p in &dev_candidates {
+        if p.exists() {
+            return p.canonicalize().map_err(|e| e.to_string());
+        }
+    }
+
+    Err(format!("{} not found near {}", name, exe_dir.display()))
+}
+
+struct ChannelUserdata {
+    channel: tauri::ipc::Channel<String>,
+}
+
+extern "C" fn progress_callback(json_line: *const c_char, userdata: *mut c_void) {
+    if json_line.is_null() || userdata.is_null() { return; }
+    let data = unsafe { &*(userdata as *const ChannelUserdata) };
+    let line = unsafe { CStr::from_ptr(json_line) }.to_string_lossy().to_string();
+    let _ = data.channel.send(line);
+}
+
+#[tauri::command]
+async fn run_diff(
+    primary_db: String,
+    secondary_db: String,
+    output_path: String,
+    slow: bool,
+    unreliable: bool,
+    channel: tauri::ipc::Channel<String>,
+) -> Result<String, String> {
+    let lib_path = find_soff_ffi_path()?;
+    let output = output_path.clone();
+
+    // Run in a separate thread to avoid blocking the async runtime
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            unsafe {
+                let lib = libloading::Library::new(&lib_path)
+                    .map_err(|e| format!("failed to load soff_ffi: {}", e))?;
+
+                let soff_diff_run: libloading::Symbol<unsafe extern "C" fn(
+                    *const c_char, *const c_char, *const c_char,
+                    *const SoffDiffOptions, SoffProgressFn, *mut c_void,
+                    *mut c_char, c_int,
+                ) -> c_int> = lib.get(b"soff_diff_run")
+                    .map_err(|e| format!("symbol not found: {}", e))?;
+
+                let c_primary = CString::new(primary_db).map_err(|e| e.to_string())?;
+                let c_secondary = CString::new(secondary_db).map_err(|e| e.to_string())?;
+                let c_output = CString::new(output.clone()).map_err(|e| e.to_string())?;
+
+                let options = SoffDiffOptions {
+                    enable_slow: if slow { 1 } else { 0 },
+                    enable_unreliable: if unreliable { 1 } else { 0 },
+                    enable_experimental: 0,
+                    max_rows: 1000000,
+                    timeout_seconds: 300,
+                };
+
+                let mut error_buf = vec![0u8; 1024];
+                let userdata = ChannelUserdata { channel };
+                let userdata_ptr = &userdata as *const ChannelUserdata as *mut c_void;
+
+                let ret = soff_diff_run(
+                    c_primary.as_ptr(), c_secondary.as_ptr(), c_output.as_ptr(),
+                    &options, progress_callback, userdata_ptr,
+                    error_buf.as_mut_ptr() as *mut c_char, 1024,
+                );
+
+                if ret != 0 {
+                    let err = CStr::from_ptr(error_buf.as_ptr() as *const c_char)
+                        .to_string_lossy().to_string();
+                    return Err(err);
+                }
+                Ok(output)
+            }
+        })();
+        let _ = tx.send(result);
+    });
+
+    rx.recv().map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -250,6 +371,7 @@ pub fn run() {
             compute_aligned_diff,
             get_analyze_stats,
             extract_cfg,
+            run_diff,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

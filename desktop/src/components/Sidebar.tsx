@@ -42,6 +42,16 @@ const items: { key: Page; icon: React.ReactNode; label: string }[] = [
       </svg>
     ),
   },
+  {
+    key: "diff",
+    label: "Diff",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+        <circle cx="12" cy="12" r="9" strokeOpacity="0.4" />
+      </svg>
+    ),
+  },
 ];
 
 export function Sidebar({ page, onPageChange, hasData }: Props) {
@@ -49,7 +59,7 @@ export function Sidebar({ page, onPageChange, hasData }: Props) {
     <div className="w-12 shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col items-center py-2 gap-1">
       {items.map((item) => {
         const active = page === item.key;
-        const disabled = item.key !== "soff" && !hasData;
+        const disabled = item.key !== "soff" && item.key !== "diff" && !hasData;
         return (
           <button
             key={item.key}

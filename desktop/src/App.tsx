@@ -6,6 +6,7 @@ import { Toolbar } from "./components/Toolbar";
 import { MatchTable } from "./components/MatchTable";
 import { DiffViewer } from "./components/DiffViewer";
 import { AnalyzeView } from "./components/AnalyzeView";
+import { DiffPage } from "./components/DiffPage";
 import { EmptyState } from "./components/EmptyState";
 import "./index.css";
 
@@ -30,7 +31,7 @@ export interface DiffMatch {
   description: string;
 }
 
-export type Page = "analyze" | "soff" | "graph";
+export type Page = "analyze" | "soff" | "graph" | "diff";
 
 export default function App() {
   const [config, setConfig] = useState<SoffConfig | null>(null);
@@ -45,6 +46,10 @@ export default function App() {
       filters: [{ name: "Soff Results", extensions: ["soff"] }],
     });
     if (!path) return;
+    await loadSoffFile(path);
+  };
+
+  const loadSoffFile = async (path: string) => {
     setSoffPath(path);
     const cfg = await invoke<SoffConfig>("open_soff", { path });
     setConfig(cfg);
@@ -70,7 +75,7 @@ export default function App() {
     <div className="flex h-screen">
       <Sidebar page={page} onPageChange={setPage} hasData={!!config} />
       <div className="flex flex-col flex-1 min-w-0">
-        {!config && page !== "soff" && <EmptyState onOpen={handleOpen} />}
+        {!config && page !== "soff" && page !== "diff" && <EmptyState onOpen={handleOpen} />}
 
         {page === "analyze" && config && (
           <AnalyzeView soffPath={soffPath} config={config} />
@@ -101,6 +106,10 @@ export default function App() {
             Select a match from the Soff panel to view
           </div>
         )}
+
+        <div className={page === "diff" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+          <DiffPage onDiffComplete={(path) => { loadSoffFile(path); }} />
+        </div>
       </div>
     </div>
   );
