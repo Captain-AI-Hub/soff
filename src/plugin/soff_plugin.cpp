@@ -2860,17 +2860,71 @@ soff::diff::DiffSessionSummary diff_databases(const DiffUiOptions& options)
         throw soff::Error(soff::ErrorCode::diff_failed, error);
     }
 
+    struct DiffProgressHooks : soff::DiffHooks
+    {
+        std::size_t heuristic_index = 0;
+        std::size_t total_heuristics = 0;
+        std::size_t total_matches = 0;
+        bool cancelled = false;
+
+        std::optional<std::string> on_launch_heuristic(
+            std::string_view name,
+            std::string_view sql) override
+        {
+            if (user_cancelled()) {
+                cancelled = true;
+                return std::nullopt;
+            }
+            ++heuristic_index;
+            replace_wait_box(
+                "Soff: diffing heuristic %zu/%zu  matches=%zu\n%.*s",
+                heuristic_index,
+                total_heuristics,
+                total_matches,
+                static_cast<int>(std::min(name.size(), std::size_t(60))),
+                name.data());
+            return std::string(sql);
+        }
+
+        soff::MatchDecision on_match(const soff::MatchContext& context) override
+        {
+            ++total_matches;
+            return {true, context.ratio};
+        }
+    };
+
+    DiffProgressHooks progress_hooks;
+    // Count total heuristics to show X/Y progress
+    {
+        const auto& base = soff::diff::builtin_heuristics();
+        progress_hooks.total_heuristics = base.size();
+    }
+
     soff::diff::DiffSessionOptions diff_options;
     diff_options.sql.enable_slow = options.slow;
     diff_options.sql.enable_unreliable = options.unreliable;
     diff_options.sql.enable_experimental = options.experimental;
     diff_options.sql.max_processed_rows = options.max_rows;
     diff_options.sql.timeout_seconds = options.timeout_seconds;
+    diff_options.hooks = &progress_hooks;
 
-    const auto summary = soff::diff::DiffSession{diff_options}.run_all(
-        options.main_db,
-        options.diff_db,
-        options.result_db);
+    show_wait_box("Soff: starting diff analysis...");
+    soff::diff::DiffSessionSummary summary;
+    try {
+        summary = soff::diff::DiffSession{diff_options}.run_all(
+            options.main_db,
+            options.diff_db,
+            options.result_db);
+    } catch (...) {
+        hide_wait_box();
+        throw;
+    }
+    hide_wait_box();
+
+    if (progress_hooks.cancelled) {
+        throw soff::Error(soff::ErrorCode::diff_failed, "diff cancelled by user");
+    }
+
     msg(
         "Soff: diff complete out=%s heuristics=%zu best=%zu partial=%zu unreliable=%zu multimatch=%zu unmatched=%zu/%zu\n",
         options.result_db.c_str(),
