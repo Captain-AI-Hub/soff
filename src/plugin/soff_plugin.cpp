@@ -2224,7 +2224,7 @@ bool has_data_ref_from(ea_t ea)
     return xref.first_from(ea, XREF_DATA);
 }
 
-soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false)
+soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false, bool skip_trivial_decompile = false)
 {
     soff::FunctionFeature feature;
     feature.address = static_cast<soff::Address>(function->start_ea);
@@ -2416,9 +2416,8 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
         }
     }
 
-    // Skip decompilation for trivial functions (single block, ≤ 5 instructions)
-    // These produce minimal pseudocode that doesn't help matching
-    if (hexrays != nullptr && hexrays->requested && feature.node_count > 1) {
+    if (hexrays != nullptr && hexrays->requested
+        && !(skip_trivial_decompile && feature.node_count <= 1)) {
         extract_pseudocode_features(function, feature, *hexrays);
         if (use_microcode) {
             extract_microcode_features(function, feature, *hexrays);
@@ -2636,7 +2635,7 @@ ExportResult build_ida_snapshot(
                     continue;
                 }
             }
-            snapshot.functions.push_back(read_function_feature(function, imagebase, &hexrays, options.use_microcode));
+            snapshot.functions.push_back(read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions));
             // Export hook: after_export_function
             if (options.hooks != nullptr) {
                 options.hooks->after_export_function(snapshot.functions.back());
