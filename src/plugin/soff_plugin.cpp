@@ -56,12 +56,16 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <queue>
 #include <regex>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <condition_variable>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2460,22 +2464,85 @@ ExportResult build_ida_snapshot(
             output_path->string().c_str());
     }
 
+    // Background writer thread for async SQLite commits
+    struct AsyncWriter {
+        soff::SnapshotRepository& repository;
+        const std::filesystem::path& output_path;
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::queue<std::vector<soff::FunctionFeature>> queue;
+        bool done = false;
+        std::size_t batch_commits = 0;
+        std::exception_ptr error;
+
+        AsyncWriter(soff::SnapshotRepository& repo, const std::filesystem::path& path)
+            : repository(repo), output_path(path) {}
+
+        void run() {
+            while (true) {
+                std::vector<soff::FunctionFeature> batch;
+                {
+                    std::unique_lock lock(mutex);
+                    cv.wait(lock, [&] { return !queue.empty() || done; });
+                    if (queue.empty() && done) break;
+                    batch = std::move(queue.front());
+                    queue.pop();
+                }
+                try {
+                    repository.append_functions(batch, output_path);
+                    ++batch_commits;
+                } catch (...) {
+                    std::lock_guard lock(mutex);
+                    error = std::current_exception();
+                    break;
+                }
+            }
+        }
+
+        void submit(std::vector<soff::FunctionFeature>& pending) {
+            if (pending.empty()) return;
+            {
+                std::lock_guard lock(mutex);
+                queue.push(std::move(pending));
+            }
+            cv.notify_one();
+            pending.clear();
+            pending.reserve(256);
+        }
+
+        void finish() {
+            {
+                std::lock_guard lock(mutex);
+                done = true;
+            }
+            cv.notify_one();
+        }
+
+        void check_error() {
+            std::lock_guard lock(mutex);
+            if (error) std::rethrow_exception(error);
+        }
+    };
+
+    std::unique_ptr<AsyncWriter> writer;
+    std::thread writer_thread;
+    if (incremental_save) {
+        writer = std::make_unique<AsyncWriter>(repository, *output_path);
+        writer_thread = std::thread([&writer]() { writer->run(); });
+    }
+
     const auto flush_pending_functions = [&]() {
         if (!incremental_save || pending_functions.empty()) {
             return;
         }
-        repository.append_functions(pending_functions, *output_path);
+        if (writer) {
+            writer->check_error();
+            writer->submit(pending_functions);
+        } else {
+            repository.append_functions(pending_functions, *output_path);
+            pending_functions.clear();
+        }
         ++result.stats.batch_commits;
-        update_crash_marker(
-            crash_path,
-            result.stats.last_function_index,
-            function_count,
-            result.stats.exported_functions,
-            result.stats.skipped_functions,
-            result.stats.last_function_address,
-            result.stats.last_function_name,
-            "batch-committed");
-        pending_functions.clear();
     };
 
     HexRaysExportContext hexrays;
@@ -2583,12 +2650,23 @@ ExportResult build_ida_snapshot(
             ++result.stats.exported_functions;
         }
         flush_pending_functions();
+        // Wait for background writer to finish
+        if (writer) {
+            writer->finish();
+            writer_thread.join();
+            writer->check_error();
+            result.stats.batch_commits = writer->batch_commits;
+        }
         update_crash_marker(
             crash_path, function_count - 1, function_count,
             result.stats.exported_functions, result.stats.skipped_functions,
             current_function_ea, current_function_name, "export-complete");
         hide_wait_box();
     } catch (...) {
+        if (writer) {
+            writer->finish();
+            if (writer_thread.joinable()) writer_thread.join();
+        }
         update_crash_marker(
             crash_path,
             result.stats.last_function_index,
