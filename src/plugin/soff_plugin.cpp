@@ -2412,7 +2412,9 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
         }
     }
 
-    if (hexrays != nullptr && hexrays->requested) {
+    // Skip decompilation for trivial functions (single block, ≤ 5 instructions)
+    // These produce minimal pseudocode that doesn't help matching
+    if (hexrays != nullptr && hexrays->requested && feature.node_count > 1) {
         extract_pseudocode_features(function, feature, *hexrays);
         if (use_microcode) {
             extract_microcode_features(function, feature, *hexrays);
@@ -2443,7 +2445,7 @@ ExportResult build_ida_snapshot(
     const bool incremental_save = output_path != nullptr;
     soff::SnapshotRepository repository;
     std::vector<soff::FunctionFeature> pending_functions;
-    constexpr std::size_t batch_size = 64;
+    constexpr std::size_t batch_size = 256;
     if (incremental_save) {
         repository.begin_incremental_save(snapshot, *output_path, !options.resume_existing_database);
         pending_functions.reserve(batch_size);
@@ -2523,7 +2525,7 @@ ExportResult build_ida_snapshot(
                     hexrays.pseudocode_functions,
                     hexrays.microcode_functions);
             }
-            if (hexrays.available && i != 0 && (i % 256) == 0) {
+            if (hexrays.available && i != 0 && (i % 1024) == 0) {
                 clear_cached_cfuncs();
                 ++hexrays.cache_clears;
             }
@@ -2547,42 +2549,15 @@ ExportResult build_ida_snapshot(
             result.stats.last_function_name = function_name;
             current_function_ea = function->start_ea;
             current_function_name = function_name;
-            update_crash_marker(
-                crash_path,
-                i,
-                function_count,
-                result.stats.exported_functions,
-                result.stats.skipped_functions,
-                function->start_ea,
-                function_name,
-                "read-function");
             const auto skip_reason = skip_reason_for(function, function_name, options);
             if (!skip_reason.empty()) {
                 ++result.stats.skipped_functions;
                 ++result.stats.skip_reasons[skip_reason];
-                update_crash_marker(
-                    crash_path,
-                    i,
-                    function_count,
-                    result.stats.exported_functions,
-                    result.stats.skipped_functions,
-                    function->start_ea,
-                    function_name,
-                    "skipped-" + skip_reason);
                 continue;
             }
             if (existing_addresses.find(static_cast<soff::Address>(function->start_ea)) != existing_addresses.end()) {
                 ++result.stats.exported_functions;
                 ++result.stats.resumed_functions;
-                update_crash_marker(
-                    crash_path,
-                    i,
-                    function_count,
-                    result.stats.exported_functions,
-                    result.stats.skipped_functions,
-                    function->start_ea,
-                    function_name,
-                    "resumed-existing");
                 continue;
             }
             // Export hook: before_export_function
@@ -2606,17 +2581,12 @@ ExportResult build_ida_snapshot(
                 }
             }
             ++result.stats.exported_functions;
-            update_crash_marker(
-                crash_path,
-                i,
-                function_count,
-                result.stats.exported_functions,
-                result.stats.skipped_functions,
-                function->start_ea,
-                function_name,
-                "function-complete");
         }
         flush_pending_functions();
+        update_crash_marker(
+            crash_path, function_count - 1, function_count,
+            result.stats.exported_functions, result.stats.skipped_functions,
+            current_function_ea, current_function_name, "export-complete");
         hide_wait_box();
     } catch (...) {
         update_crash_marker(
