@@ -73,12 +73,14 @@ export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Pr
         <span className="text-[var(--text-muted)] text-[10px]">↔</span>
         <span className="font-mono text-[11px] text-[var(--text-secondary)] truncate max-w-[180px]">{match.secondary_name}</span>
         <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-surface)] text-[var(--text-muted)]">{(match.ratio * 100).toFixed(0)}%</span>
-        <div className="ml-auto flex gap-1">
-          <TabBtn active={mode === "side-pseudo"} onClick={() => setMode("side-pseudo")}>Pseudo ⇔</TabBtn>
-          <TabBtn active={mode === "side-asm"} onClick={() => setMode("side-asm")}>ASM ⇔</TabBtn>
-          <TabBtn active={mode === "unified-pseudo"} onClick={() => setMode("unified-pseudo")}>Pseudo ±</TabBtn>
-          <TabBtn active={mode === "unified-asm"} onClick={() => setMode("unified-asm")}>ASM ±</TabBtn>
-          <TabBtn active={mode === "cfg"} onClick={() => setMode("cfg")}>CFG</TabBtn>
+        <div className="ml-auto flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--bg-primary)] border border-[var(--border)]">
+          <TabBtn active={mode === "side-pseudo"} onClick={() => setMode("side-pseudo")} icon="⇔" label="Pseudo" />
+          <TabBtn active={mode === "side-asm"} onClick={() => setMode("side-asm")} icon="⇔" label="ASM" />
+          <div className="w-px h-4 bg-[var(--border)] mx-0.5" />
+          <TabBtn active={mode === "unified-pseudo"} onClick={() => setMode("unified-pseudo")} icon="±" label="Pseudo" />
+          <TabBtn active={mode === "unified-asm"} onClick={() => setMode("unified-asm")} icon="±" label="ASM" />
+          <div className="w-px h-4 bg-[var(--border)] mx-0.5" />
+          <TabBtn active={mode === "cfg"} onClick={() => setMode("cfg")} icon="◈" label="CFG" />
         </div>
       </div>
       <div className="flex-1 overflow-hidden">
@@ -223,17 +225,18 @@ function UnifiedLine({ line, num, isAsm }: { line: string; num: number; isAsm: b
 }
 
 /* ===== CFG Placeholder ===== */
-function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function TabBtn({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: string; label: string }) {
   return (
     <button
       onClick={onClick}
-      className={`px-2.5 py-1 text-[10px] font-medium rounded-md transition-all duration-100 ${
+      className={`flex items-center gap-1 px-2.5 py-1 text-[10px] font-medium rounded-md transition-all duration-100 ${
         active
-          ? "bg-[var(--accent)] text-white"
-          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+          ? "bg-[var(--accent)] text-white shadow-sm shadow-[var(--accent)]/30"
+          : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
       }`}
     >
-      {children}
+      <span className={active ? "opacity-90" : "opacity-50"}>{icon}</span>
+      <span>{label}</span>
     </button>
   );
 }

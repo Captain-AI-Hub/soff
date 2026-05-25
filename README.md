@@ -1,5 +1,7 @@
 # Soff
 
+[中文文档](README_CN.md)
+
 High-performance binary diff engine for IDA Pro. Exports function features from IDA databases and compares them using 40+ heuristics to identify matching, modified, and unmatched functions across binary versions.
 
 ![Analyze View](img/analyze.png)
@@ -10,7 +12,7 @@ High-performance binary diff engine for IDA Pro. Exports function features from 
 |-----------|-------------|
 | `soff.dll` / `.so` / `.dylib` | IDA Pro plugin (IDA 9.0+) |
 | `soff_cli` | Command-line diff tool |
-| `soff-desktop` | Standalone viewer (Tauri app) |
+| `soff-desktop` | Standalone result viewer (Tauri app) |
 
 ## Installation
 
@@ -31,41 +33,53 @@ cp soff.dylib "$IDADIR/plugins/"
 
 ### IDA Plugin
 
-**Export:**
+After loading the plugin, a top-level **Soff** menu appears in IDA's menu bar:
 
-1. Open a binary in IDA, wait for auto-analysis to complete
-2. `Edit → Plugins → Soff` or `Soff → Export`
-3. Choose output path (`.sqlite` file)
-4. Options:
-   - **Use decompiler** — export Hex-Rays pseudocode (slower but enables more heuristics)
-   - **Exclude library/thunk** — skip trivial wrapper functions
-5. Wait for export to finish
+| Menu Item | Description |
+|-----------|-------------|
+| **Export current IDB** | Export the current database's function features to a `.sqlite` file |
+| **Diff SQLite databases** | Compare two exported `.sqlite` files and produce a `.soff` result |
+| **Load Diff Results** | Load a previously saved `.soff` result into the chooser |
+| **Save Diff Results As** | Save current diff results to a new `.soff` file |
+| **Import Diff Results** | Apply a `.soff` result to the current IDB: rename functions, import types/comments/prototypes from the matched binary |
+| **Local Function Diff** | Compare two functions within the same IDB. Generates an HTML diff (text, native graph, or microcode graph) and opens it in the browser |
 
-**Diff:**
+---
 
-1. Export both binaries (primary and secondary) to `.sqlite` files
-2. `Soff → Diff` in the primary IDA instance
-3. Select the secondary `.sqlite` file
-4. Results appear in the "Soff Diff Results" chooser
+#### Export current IDB
 
-**Local Diff (single IDA instance):**
+| Field | Description |
+|-------|-------------|
+| **Output SQLite** | Path for the exported `.sqlite` database |
+| **From address** | Start address for export range (default: beginning of binary) |
+| **To address** | End address for export range (default: end of binary) |
 
-1. `Soff → Local Function Diff`
-2. Select two exported `.sqlite` files
-3. Results appear without needing both IDBs open
+| Option | Description |
+|--------|-------------|
+| **Use decompiler** | Export Hex-Rays pseudocode. Enables pseudocode-based heuristics during diff. Requires Hex-Rays license |
+| **Export microcode (slow)** | Export Hex-Rays microcode IR. Enables microcode-based matching but significantly increases export time |
+| **Exclude library/thunk/nullsub** | Skip library functions, thunk wrappers, and empty stubs |
+| **Ignore very small functions** | Skip functions with fewer than 4 instructions |
 
-### CLI
+---
 
-```bash
-# Export (headless, requires idat/idat64)
-soff_cli export input.idb -o output.sqlite
+#### Diff SQLite databases
 
-# Diff two exports
-soff_cli diff primary.sqlite secondary.sqlite -o results.soff
+| Field | Description |
+|-------|-------------|
+| **Primary SQLite** | The original (baseline) exported database |
+| **Secondary SQLite** | The modified (patched/updated) exported database |
+| **Result DB** | Output path for the `.soff` result file |
+| **Max rows** | Maximum number of match results to produce (default: 1000000) |
+| **Timeout seconds** | Maximum time for the diff operation (default: 300s) |
 
-# View summary
-soff_cli info results.soff
-```
+| Option | Description |
+|--------|-------------|
+| **Enable slow heuristics** | Run computationally expensive heuristics (fuzzy hashing, graph comparison). Recommended for thorough analysis |
+| **Enable unreliable heuristics** | Include low-confidence matching algorithms. May produce false positives |
+| **Enable experimental heuristics** | Use experimental matching strategies still under development |
+
+---
 
 ### Desktop Viewer
 
@@ -75,80 +89,47 @@ Open a `.soff` result file to browse matches interactively.
 
 ![Graph View](img/graph.png)
 
+---
+
+### CLI
+
+```bash
+# Diff two exports
+soff_cli diff primary.sqlite secondary.sqlite -o results.soff
+
+# View summary
+soff_cli info results.soff
+```
+
 ## IDA Chooser Fields
 
-When you run a diff in IDA, results appear in a chooser with these columns:
+Results appear in the "Soff Diff Results" chooser:
 
 | Column | Description |
 |--------|-------------|
-| **Type** | Match confidence: `best` (high confidence), `partial` (medium), `unreliable` (low) |
-| **Ratio** | Similarity score from 0.0 to 1.0. A ratio of 1.0 means identical; lower values indicate more differences |
-| **Primary** | Address of the function in the primary (original) binary |
+| **Type** | Match confidence: `best`, `partial`, or `unreliable` |
+| **Ratio** | Similarity score 0.0–1.0. 1.0 = identical |
+| **Primary** | Function address in the primary binary |
 | **Primary name** | Function name in the primary binary |
-| **Secondary** | Address of the matched function in the secondary (patched/updated) binary |
+| **Secondary** | Function address in the secondary binary |
 | **Secondary name** | Function name in the secondary binary |
-| **Description** | The heuristic that produced this match (see below) |
+| **Description** | The heuristic that produced this match |
 
 ### Match Types
 
 | Type | Meaning |
 |------|---------|
-| `best` | High-confidence match. The heuristic is deterministic (hash-based) or the ratio is 1.0 |
-| `partial` | Medium-confidence match. Structural similarity detected but not identical |
-| `unreliable` | Low-confidence match. May be a false positive; review manually |
+| `best` | High confidence. Hash-based or ratio = 1.0 |
+| `partial` | Medium confidence. Structural similarity detected |
+| `unreliable` | Low confidence. May be false positive |
 
-### Description (Heuristics)
+### Heuristics (Description column)
 
-The Description column shows which heuristic matched the function pair. Common values:
+**Best:**
+`Same RVA and hash` · `Same order and hash` · `Bytes hash` · `Same cleaned assembly` · `Same cleaned pseudo-code` · `Same cleaned microcode` · `Equal assembly or pseudo-code` · `Same RVA` · `Same address, nodes, edges and mnemonics`
 
-**Best (deterministic):**
-- `Same RVA and hash` — identical bytes at the same relative address
-- `Same order and hash` — identical bytes, same ordinal position
-- `Bytes hash` — identical raw bytes (address-independent)
-- `Same cleaned assembly` — identical assembly after stripping addresses/constants
-- `Same cleaned pseudo-code` — identical decompiled code after normalization
-- `Same cleaned microcode` — identical Hex-Rays microcode
-- `Equal assembly or pseudo-code` — exact text match
-- `Same RVA` — same relative virtual address (name may differ)
-- `Same address, nodes, edges and mnemonics` — structural + instruction match
-
-**Partial (heuristic):**
-- `Same compilation unit` — functions from the same source file
-- `Same KOKA hash and constants` — control flow + constant values match
-- `Same constants` — shared magic numbers / string references
-- `Same rare KOKA hash` — unique control flow pattern
-- `Same rare MD Index` — unique complexity fingerprint
-- `Same MD Index and constants` — complexity + constants match
-- `Similar pseudo-code and names` — fuzzy decompiled code comparison
-- `Pseudo-code fuzzy hash` — ssdeep-style fuzzy hash of pseudocode
-- `Partial pseudo-code fuzzy hash (normal/reverse/mixed)` — partial fuzzy match
-- `Same nodes, edges, loops and strongly connected components` — graph topology
-- `Same low complexity, prototype and names` — small functions with matching signatures
-- `Same graph` — isomorphic control flow graph
-- `Same high complexity` — matching cyclomatic complexity (large functions)
-- `Same rare assembly instruction` — unique opcode sequence
-- `Same rare basic block mnemonics list` — unique block-level instruction pattern
-- `Topological sort hash` — matching Tarjan SCC ordering
-- `Import names hash` — same set of imported API calls
-
-## Export Options
-
-| Option | Default | Env Variable | Description |
-|--------|---------|--------------|-------------|
-| Use decompiler | `true` | `DIAPHORA_USE_DECOMPILER` | Export Hex-Rays pseudocode |
-| Exclude library/thunk | `true` | — | Skip trivial wrappers |
-| Ignore small functions | `false` | — | Skip functions with < 4 instructions |
-| Resume existing | `false` | — | Continue a previously interrupted export |
-
-## Exported Function Features
-
-Each function is exported with 49 feature columns including:
-
-- **Structural:** nodes, edges, indegree, outdegree, cyclomatic complexity, loops, strongly connected components
-- **Content:** bytes hash, mnemonics, constants, assembly, pseudocode
-- **Identity:** name, address, RVA, prototype, mangled name
-- **Hashes:** function hash, KOKA hash (kgh_hash), MD Index, pseudocode hashes (3 variants), mnemonics SPP, topological sort hash
-- **Decompiler:** pseudocode, pseudocode lines, clean pseudo, microcode, clean microcode
+**Partial:**
+`Same compilation unit` · `Same KOKA hash and constants` · `Same constants` · `Same rare KOKA hash` · `Same rare MD Index` · `Same MD Index and constants` · `Similar pseudo-code and names` · `Pseudo-code fuzzy hash` · `Partial pseudo-code fuzzy hash` · `Same nodes, edges, loops and strongly connected components` · `Same graph` · `Same high complexity` · `Same rare assembly instruction` · `Same rare basic block mnemonics list` · `Topological sort hash` · `Import names hash`
 
 ## Build
 
@@ -158,9 +139,7 @@ xmake config --ida_plugin=y -y
 xmake build -y
 
 # Desktop app
-cd desktop
-bun install
-bun run tauri build
+cd desktop && bun install && bun run tauri build
 ```
 
 ## License

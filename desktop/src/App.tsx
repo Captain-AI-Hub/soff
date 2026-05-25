@@ -49,7 +49,7 @@ export default function App() {
     const cfg = await invoke<SoffConfig>("open_soff", { path });
     setConfig(cfg);
     const data = await invoke<DiffMatch[]>("get_matches", {
-      path, matchType: "all", limit: 5000, offset: 0,
+      path, matchType: "all", limit: 100000, offset: 0,
     });
     setMatches(data);
     setSelected(null);
