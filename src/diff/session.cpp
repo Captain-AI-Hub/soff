@@ -306,7 +306,7 @@ DiffSessionSummary run_session(
     SqlHeuristicRunner runner;
     auto equal_matches = find_equal_matches(database);
 
-    // Fast path: stripped binaries (99%+ address match)
+    // Fast path: stripped binaries (99%+ address+hash match)
     bool is_stripped_fast_path = false;
     if (!exact_only && !equal_matches.empty()) {
         const auto total_primary = database.query_int(
@@ -314,19 +314,22 @@ DiffSessionSummary run_session(
         const auto total_secondary = database.query_int(
             "select count(*) from diff.functions");
         if (total_primary > 0 && total_secondary > 0) {
-            const auto address_matches = database.query_int(
+            // Count functions with same address AND same bytes_hash (not just address)
+            const auto address_hash_matches = database.query_int(
                 "select count(*) from functions f, diff.functions df "
-                "where f.address = df.address");
+                "where f.address = df.address and f.bytes_hash = df.bytes_hash "
+                "and f.bytes_hash != '' and f.bytes_hash is not null");
             const auto min_total = std::min(total_primary, total_secondary);
             if (min_total > 0) {
-                const double percent = 100.0 * static_cast<double>(address_matches)
+                const double percent = 100.0 * static_cast<double>(address_hash_matches)
                     / static_cast<double>(min_total);
                 if (percent >= options.config.speedup_stripped_binaries_min_percent) {
                     is_stripped_fast_path = true;
                     equal_matches.clear();
                     const auto rows = database.query_rows(
                         "select f.address, f.name, f.nodes from functions f, diff.functions df "
-                        "where f.address = df.address");
+                        "where f.address = df.address and f.bytes_hash = df.bytes_hash "
+                        "and f.bytes_hash != '' and f.bytes_hash is not null");
                     int line = 0;
                     for (const auto& row : rows) {
                         if (row.size() < 3) continue;
@@ -344,7 +347,7 @@ DiffSessionSummary run_session(
                         try { nodes = std::stoi(row[2]); } catch (...) {}
                         m.primary_nodes = nodes;
                         m.secondary_nodes = nodes;
-                        m.description = "Stripped binary (address match)";
+                        m.description = "Stripped binary (address+hash match)";
                         equal_matches.push_back(std::move(m));
                     }
                 }
