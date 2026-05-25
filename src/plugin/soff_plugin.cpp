@@ -2853,12 +2853,20 @@ ExportResult export_current_idb(const std::filesystem::path& output_path, Export
 
 soff::diff::DiffSessionSummary diff_databases(const DiffUiOptions& options)
 {
+    show_wait_box("Soff: loading databases...");
+
     if (const auto error = validate_export_database(options.main_db, "Primary"); !error.empty()) {
+        hide_wait_box();
         throw soff::Error(soff::ErrorCode::diff_failed, error);
     }
+    if (user_cancelled()) { hide_wait_box(); throw soff::Error(soff::ErrorCode::diff_failed, "cancelled"); }
+    replace_wait_box("Soff: validating secondary database...");
     if (const auto error = validate_export_database(options.diff_db, "Secondary"); !error.empty()) {
+        hide_wait_box();
         throw soff::Error(soff::ErrorCode::diff_failed, error);
     }
+    if (user_cancelled()) { hide_wait_box(); throw soff::Error(soff::ErrorCode::diff_failed, "cancelled"); }
+    replace_wait_box("Soff: preparing diff session...");
 
     struct DiffProgressHooks : soff::DiffHooks
     {
@@ -2894,7 +2902,6 @@ soff::diff::DiffSessionSummary diff_databases(const DiffUiOptions& options)
     };
 
     DiffProgressHooks progress_hooks;
-    // Count total heuristics to show X/Y progress
     {
         const auto& base = soff::diff::builtin_heuristics();
         progress_hooks.total_heuristics = base.size();
@@ -2908,7 +2915,7 @@ soff::diff::DiffSessionSummary diff_databases(const DiffUiOptions& options)
     diff_options.sql.timeout_seconds = options.timeout_seconds;
     diff_options.hooks = &progress_hooks;
 
-    show_wait_box("Soff: starting diff analysis...");
+    replace_wait_box("Soff: running heuristics (loading function data)...");
     soff::diff::DiffSessionSummary summary;
     try {
         summary = soff::diff::DiffSession{diff_options}.run_all(
