@@ -423,8 +423,12 @@ DiffSessionSummary run_session(
         cleanup_matches(results.matches, matched_primary, matched_secondary);
     }
 
+    // Fixed-point iteration: heuristics → propagation → repeat until convergence
     PropagationStats propagation_stats;
-    if (!exact_only && options.propagation.enabled) {
+    constexpr int max_fixed_point_iterations = 3;
+    for (int fp_iter = 0; fp_iter < max_fixed_point_iterations && !exact_only && options.propagation.enabled; ++fp_iter) {
+        const auto matches_before = results.matches.size();
+
         auto prop_options = options.propagation;
         prop_options.same_processor = sql_options.same_processor;
         prop_options.enable_slow = sql_options.enable_slow;
@@ -432,6 +436,23 @@ DiffSessionSummary run_session(
             database, results.matches,
             matched_primary, matched_secondary, prop_options);
         cleanup_matches(results.matches, matched_primary, matched_secondary);
+
+        const auto matches_after = results.matches.size();
+        if (matches_after == matches_before) break;
+
+        // Propagation found new matches — re-run heuristics with updated exclusions
+        if (fp_iter < max_fixed_point_iterations - 1 && !is_stripped_fast_path && !is_patchdiff_fast_path) {
+            sql_options.pre_matched_primary = matched_primary;
+            sql_options.pre_matched_secondary = matched_secondary;
+            auto rerun = runner.run_all(database, sql_options);
+            for (auto& m : rerun.matches) {
+                if (matched_primary.count(m.primary) || matched_secondary.count(m.secondary)) continue;
+                matched_primary.insert(m.primary);
+                matched_secondary.insert(m.secondary);
+                results.matches.push_back(std::move(m));
+            }
+            cleanup_matches(results.matches, matched_primary, matched_secondary);
+        }
     }
 
     resolve_multimatches(results.matches);
