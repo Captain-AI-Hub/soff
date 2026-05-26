@@ -2635,16 +2635,18 @@ ExportResult build_ida_snapshot(
                     continue;
                 }
             }
-            snapshot.functions.push_back(read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions));
+            auto feature = read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions);
             // Export hook: after_export_function
             if (options.hooks != nullptr) {
-                options.hooks->after_export_function(snapshot.functions.back());
+                options.hooks->after_export_function(feature);
             }
             if (incremental_save) {
-                pending_functions.push_back(snapshot.functions.back());
+                pending_functions.push_back(std::move(feature));
                 if (pending_functions.size() >= batch_size) {
                     flush_pending_functions();
                 }
+            } else {
+                snapshot.functions.push_back(std::move(feature));
             }
             ++result.stats.exported_functions;
         }
