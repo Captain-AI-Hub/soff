@@ -82,7 +82,7 @@ int main()
     assert(!soff::db::diaphora_compatible_schema().tables.empty());
     assert(!soff::db::diaphora_compatible_schema().indexes.empty());
     const auto& heuristics = soff::diff::builtin_heuristics();
-    assert(heuristics.size() == 50);
+    assert(heuristics.size() == 51);
 
     auto best = 0;
     auto partial = 0;
@@ -143,14 +143,14 @@ int main()
         helper_unreliable += soff::diff::is_unreliable(heuristic) ? 1 : 0;
     }
 
-    assert(best == 12);
+    assert(best == 13);
     assert(partial == 30);
     assert(unreliable == 8);
     assert(no_fps == 5);
-    assert(ratio == 22);
+    assert(ratio == 23);
     assert(ratio_min == 22);
     assert(trusted_ratio_min == 1);
-    assert(no_flags == 30);
+    assert(no_flags == 31);
     assert(same_cpu == 8);
     assert(slow == 9);
     assert(slow_unreliable == 3);

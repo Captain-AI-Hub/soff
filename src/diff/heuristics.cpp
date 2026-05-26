@@ -676,6 +676,59 @@ const std::vector<HeuristicDefinition>& builtin_heuristics()
        order by f.source_file = df.source_file)SOFFSQL",
         },
         {
+            "Same unique MD Index",
+            HeuristicCategory::best,
+            RatioMode::ratio,
+            heuristic_flag_none,
+            0.0,
+            R"SOFFSQL(
+     with unique_md_primary as (
+      select md_index from functions
+       where cast(md_index as real) > 0
+       group by md_index having count(*) = 1
+     ),
+     unique_md_secondary as (
+      select md_index from diff.functions
+       where cast(md_index as real) > 0
+       group by md_index having count(*) = 1
+     )
+     select  f.address ea, f.name name1, df.address ea2, df.name name2,
+                  'Same unique MD Index' description,
+                  f.pseudocode pseudo1, df.pseudocode pseudo2,
+                  f.assembly asm1, df.assembly asm2,
+                  f.pseudocode_primes pseudo_primes1, df.pseudocode_primes pseudo_primes2,
+                  f.nodes nodes1, df.nodes nodes2,
+                  cast(f.md_index as real) md1, cast(df.md_index as real) md2,
+                  f.clean_assembly clean_assembly1, df.clean_assembly clean_assembly2,
+                  f.clean_pseudo clean_pseudo1, df.clean_pseudo clean_pseudo2,
+                  f.mangled_function mangled1, df.mangled_function mangled2,
+                  f.clean_microcode clean_micro1, df.clean_microcode clean_micro2,
+                  f.bytes_hash bytes_hash1, df.bytes_hash bytes_hash2,
+                  f.edges edges1, df.edges edges2,
+                  f.indegree indegree1, df.indegree indegree2,
+                  f.outdegree outdegree1, df.outdegree outdegree2,
+                  f.instructions instructions1, df.instructions instructions2,
+                  f.cyclomatic_complexity cc1, df.cyclomatic_complexity cc2,
+                  f.strongly_connected strongly_connected1,
+                  df.strongly_connected strongly_connected2,
+                  f.loops loops1, df.loops loops2,
+                  f.constants_count constants_count1,
+                  df.constants_count constants_count2,
+                  f.size size1, df.size size2,
+                  f.kgh_hash kgh_hash1, df.kgh_hash kgh_hash2
+
+       from functions f,
+            diff.functions df,
+            unique_md_primary p,
+            unique_md_secondary s
+      where f.md_index = df.md_index
+        and f.md_index = p.md_index
+        and df.md_index = s.md_index
+        and f.nodes >= 5 and df.nodes >= 5
+        %POSTFIX%
+       order by f.source_file = df.source_file)SOFFSQL",
+        },
+        {
             "Same named compilation unit function match",
             HeuristicCategory::partial,
             RatioMode::trusted_ratio_with_minimum,
@@ -1883,7 +1936,7 @@ select  f.address ea, f.name name1, df.address ea2, df.name name2,
  where f.id  = query1.main_func_id
    and df.id = query1.diff_func_id
    and f.name != df.name
-   and ((min(f.nodes, df.nodes) * 100) / max(f.nodes, df.nodes)) < 50
+   and ((min(f.nodes, df.nodes) * 100) / max(f.nodes, df.nodes)) > 50
    %POSTFIX%)SOFFSQL",
         },
         {
@@ -1951,7 +2004,7 @@ select  f.address ea, f.name name1, df.address ea2, df.name name2,
    and f.nodes > 3
    and df.nodes > 3
    and diff_query.inst_total >= 6
-   and ((min(f.nodes, df.nodes) * 100) / max(f.nodes, df.nodes)) < 50
+   and ((min(f.nodes, df.nodes) * 100) / max(f.nodes, df.nodes)) > 50
    %POSTFIX%)SOFFSQL",
         },
         {

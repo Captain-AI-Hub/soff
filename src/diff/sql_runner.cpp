@@ -352,7 +352,9 @@ double compute_ratio(db::Database& database, const CandidateRow& candidate, bool
 
     double v4 = 0.0;
     if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
-        v4 = std::min((v1 + v2 + v3 + 3.0) / 5.0, 1.0);
+        // MD Index match: boost the average of text signals by 0.1
+        const double avg = (v1 + v2 + v3) / 3.0;
+        v4 = std::min(avg + 0.1, 1.0);
     }
     const double v5 = candidate_text_ratio("", "", "", "", candidate.stripped_micro1, candidate.stripped_micro2, "", "");
     if (v5 == 1.0) {
@@ -396,7 +398,8 @@ double compute_ratio_fast(const CandidateRow& candidate)
 
     double v4 = 0.0;
     if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
-        v4 = std::min((v1 + v2 + v3 + 3.0) / 5.0, 1.0);
+        const double avg = (v1 + v2 + v3) / 3.0;
+        v4 = std::min(avg + 0.1, 1.0);
     }
     const double v5 = candidate_text_ratio("", "", "", "", candidate.stripped_micro1, candidate.stripped_micro2, "", "");
     if (v5 == 1.0) return 1.0;

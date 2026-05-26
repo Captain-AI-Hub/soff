@@ -18,6 +18,17 @@ bool starts_with(const std::string& s, const char* prefix)
     return s.size() >= len && s.compare(0, len, prefix) == 0;
 }
 
+std::string sql_escape(const std::string& value)
+{
+    std::string result;
+    result.reserve(value.size() + 4);
+    for (char c : value) {
+        if (c == '\'') result += "''";
+        else result += c;
+    }
+    return result;
+}
+
 Address parse_addr(const std::string& text)
 {
     Address addr = 0;
@@ -144,6 +155,73 @@ std::size_t find_same_name(
         matched_primary.insert(primary_addr);
         matched_secondary.insert(secondary_addr);
         ++added;
+    }
+    return added;
+}
+
+std::size_t find_call_reference_matches(
+    db::Database& database,
+    std::vector<db::ResultMatch>& matches,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    double min_ratio,
+    bool same_processor)
+{
+    std::size_t added = 0;
+    const auto current_matches = matches;
+
+    for (const auto& m : current_matches) {
+        if (m.ratio < 0.5) continue;
+
+        // Get callees of primary function
+        const auto callees_p = database.query_rows(
+            "select c.address, f.address, f.name, f.nodes from callgraph c "
+            "inner join functions f on f.address = c.address "
+            "where c.func_id = (select id from functions where address = '"
+            + std::to_string(m.primary) + "') and c.type = 'call'");
+
+        // Get callees of secondary function
+        const auto callees_s = database.query_rows(
+            "select c.address, f.address, f.name, f.nodes from diff.callgraph c "
+            "inner join diff.functions f on f.address = c.address "
+            "where c.func_id = (select id from diff.functions where address = '"
+            + std::to_string(m.secondary) + "') and c.type = 'call'");
+
+        if (callees_p.size() != callees_s.size()) continue;
+        if (callees_p.empty()) continue;
+
+        // Match callees by position (same call order)
+        for (std::size_t i = 0; i < callees_p.size() && i < callees_s.size(); ++i) {
+            if (callees_p[i].size() < 4 || callees_s[i].size() < 4) continue;
+            const auto addr_p = parse_addr(callees_p[i][1]);
+            const auto addr_s = parse_addr(callees_s[i][1]);
+            if (addr_p == 0 || addr_s == 0) continue;
+            if (matched_primary.count(addr_p) || matched_secondary.count(addr_s)) continue;
+
+            const auto nodes_p = parse_int_safe(callees_p[i][3]);
+            const auto nodes_s = parse_int_safe(callees_s[i][3]);
+            if (nodes_p < 2 && nodes_s < 2) continue;
+            if (nodes_p > 0 && nodes_s > 0) {
+                const auto ratio_n = std::min(nodes_p, nodes_s) * 100 / std::max(nodes_p, nodes_s);
+                if (ratio_n < 25) continue;
+            }
+
+            db::ResultMatch new_match;
+            new_match.kind = db::ResultKind::partial;
+            new_match.primary = addr_p;
+            new_match.primary_name = callees_p[i][2];
+            new_match.secondary = addr_s;
+            new_match.secondary_name = callees_s[i][2];
+            new_match.ratio = 0.6;
+            new_match.primary_nodes = static_cast<int>(nodes_p);
+            new_match.secondary_nodes = static_cast<int>(nodes_s);
+            new_match.description = "Call reference propagation";
+            new_match.line = static_cast<int>(matches.size());
+            matches.push_back(new_match);
+            matched_primary.insert(addr_p);
+            matched_secondary.insert(addr_s);
+            ++added;
+        }
     }
     return added;
 }
@@ -278,10 +356,10 @@ std::size_t find_matches_diffing(
 
                 const auto lookup_p = database.query_rows(
                     "select address, name, nodes from functions where name = '"
-                    + pn + "' limit 1");
+                    + sql_escape(pn) + "' limit 1");
                 const auto lookup_s = database.query_rows(
                     "select address, name, nodes from diff.functions where name = '"
-                    + sn + "' limit 1");
+                    + sql_escape(sn) + "' limit 1");
                 if (lookup_p.empty() || lookup_s.empty()) continue;
                 if (lookup_p.front().size() < 3 || lookup_s.front().size() < 3) continue;
 
@@ -385,9 +463,9 @@ std::size_t find_matches_diffing(
         for (const auto& pn : only_p) {
             for (const auto& sn : only_s) {
                 const auto lookup_p2 = database.query_rows(
-                    "select address, name, nodes from functions where name = '" + pn + "' limit 1");
+                    "select address, name, nodes from functions where name = '" + sql_escape(pn) + "' limit 1");
                 const auto lookup_s2 = database.query_rows(
-                    "select address, name, nodes from diff.functions where name = '" + sn + "' limit 1");
+                    "select address, name, nodes from diff.functions where name = '" + sql_escape(sn) + "' limit 1");
                 if (lookup_p2.empty() || lookup_s2.empty()) continue;
                 if (lookup_p2.front().size() < 3 || lookup_s2.front().size() < 3) continue;
 
@@ -479,12 +557,13 @@ std::size_t find_related_constants(
 
         for (const auto& constant : shared) {
             // Frequency filter: skip constants referenced by too many functions
+            const auto escaped_constant = sql_escape(constant);
             const auto freq_p = database.query_rows(
                 "select count(distinct func_id) from constants where constant = '"
-                + constant + "'");
+                + escaped_constant + "'");
             const auto freq_s = database.query_rows(
                 "select count(distinct func_id) from diff.constants where constant = '"
-                + constant + "'");
+                + escaped_constant + "'");
             if (!freq_p.empty() && !freq_p.front().empty()) {
                 if (parse_int_safe(freq_p.front()[0]) > 512) continue;
             }
@@ -494,10 +573,10 @@ std::size_t find_related_constants(
 
             const auto funcs_p = database.query_rows(
                 "select distinct func_id from constants where constant = '"
-                + constant + "'");
+                + escaped_constant + "'");
             const auto funcs_s = database.query_rows(
                 "select distinct func_id from diff.constants where constant = '"
-                + constant + "'");
+                + escaped_constant + "'");
 
             for (const auto& fp : funcs_p) {
                 if (fp.empty()) continue;
@@ -583,6 +662,11 @@ PropagationStats run_propagation(
             options.same_name_min_ratio, options.same_processor);
         round_added += cu_matches;
 
+        const auto call_ref = find_call_reference_matches(
+            database, matches, matched_primary, matched_secondary,
+            options.same_name_min_ratio, options.same_processor);
+        round_added += call_ref;
+
         const auto affine = find_locally_affine_functions(
             database, matches, matched_primary, matched_secondary,
             options.affine_min_ratio, options.max_functions_per_gap,
@@ -623,13 +707,13 @@ std::size_t find_compilation_unit_matches(
             "from functions f "
             "inner join compilation_unit_functions cuf on cuf.address = f.address "
             "inner join compilation_units cu on cu.id = cuf.cu_id "
-            "where cu.name = '" + cu_name + "'");
+            "where cu.name = '" + sql_escape(cu_name) + "'");
         const auto secondary_funcs = database.query_rows(
             "select f.address, f.name, f.nodes, f.clean_assembly, f.clean_pseudo "
             "from diff.functions f "
             "inner join diff.compilation_unit_functions cuf on cuf.address = f.address "
             "inner join diff.compilation_units cu on cu.id = cuf.cu_id "
-            "where cu.name = '" + cu_name + "'");
+            "where cu.name = '" + sql_escape(cu_name) + "'");
 
         for (const auto& pf : primary_funcs) {
             if (pf.size() < 5) continue;
