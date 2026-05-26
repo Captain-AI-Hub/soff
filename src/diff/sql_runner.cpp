@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iterator>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -682,6 +683,35 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
                 }
             }
             for (auto& f : futures) f.get();
+        }
+
+        // Phase 1.5: Disambiguation — when multiple candidates share the same
+        // primary or secondary address, keep only the highest-ratio candidate.
+        // This prevents greedy first-come-first-served from picking suboptimal matches.
+        {
+            boost::unordered_flat_set<Address> best_primary;
+            boost::unordered_flat_set<Address> best_secondary;
+            // Sort by ratio descending so we see the best candidate first
+            std::vector<std::size_t> order(scored.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                return scored[a].ratio > scored[b].ratio;
+            });
+            for (auto idx : order) {
+                auto& sc = scored[idx];
+                if (!sc.valid) continue;
+                const auto p = sc.candidate.primary;
+                const auto s = sc.candidate.secondary;
+                const bool p_seen = best_primary.find(p) != best_primary.end();
+                const bool s_seen = best_secondary.find(s) != best_secondary.end();
+                if (p_seen || s_seen) {
+                    // A better candidate already claimed this address
+                    sc.valid = false;
+                    continue;
+                }
+                best_primary.insert(p);
+                best_secondary.insert(s);
+            }
         }
 
         // Phase 2: sequential deep_ratio_bonus + filtering

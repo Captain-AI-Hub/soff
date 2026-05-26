@@ -70,12 +70,12 @@ pub fn query_matches(path: &str, match_type: &str, limit: u32, offset: u32) -> S
     let sql = if match_type == "all" {
         format!(
             "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
-             FROM results ORDER BY line LIMIT {} OFFSET {}", limit, offset
+             FROM results ORDER BY ratio ASC, line LIMIT {} OFFSET {}", limit, offset
         )
     } else {
         format!(
             "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
-             FROM results WHERE type = '{}' ORDER BY line LIMIT {} OFFSET {}",
+             FROM results WHERE type = '{}' ORDER BY ratio ASC, line LIMIT {} OFFSET {}",
             match_type, limit, offset
         )
     };

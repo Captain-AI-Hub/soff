@@ -31,6 +31,12 @@ export interface DiffMatch {
   description: string;
 }
 
+interface UnmatchedFunction {
+  side: string;
+  address: string;
+  name: string;
+}
+
 export type Page = "analyze" | "soff" | "graph" | "diff";
 
 export default function App() {
@@ -54,7 +60,7 @@ export default function App() {
     const cfg = await invoke<SoffConfig>("open_soff", { path });
     setConfig(cfg);
     const data = await invoke<DiffMatch[]>("get_matches", {
-      path, matchType: "all", limit: 100000, offset: 0,
+      path, matchType: "all", limit: 500000, offset: 0,
     });
     setMatches(data);
     setSelected(null);
@@ -66,10 +72,34 @@ export default function App() {
     setPage("graph");
   };
 
-  const filtered = (filter === "all"
-    ? matches
-    : matches.filter((m) => m.match_type === filter)
-  ).slice().sort((a, b) => a.ratio - b.ratio);
+  const loadFilteredMatches = async (type: string) => {
+    setFilter(type);
+    if (!soffPath) return;
+    if (type === "unmatched") {
+      const data = await invoke<UnmatchedFunction[]>("get_unmatched", {
+        path: soffPath, limit: 500000, offset: 0,
+      });
+      // Convert unmatched to DiffMatch format for display
+      setMatches(data.map((u) => ({
+        match_type: u.side,
+        primary_addr: u.side === "primary" ? u.address : "",
+        primary_name: u.side === "primary" ? u.name : "",
+        secondary_addr: u.side === "secondary" ? u.address : "",
+        secondary_name: u.side === "secondary" ? u.name : "",
+        ratio: 0,
+        nodes1: 0,
+        nodes2: 0,
+        description: "Unmatched " + u.side,
+      })));
+    } else {
+      const data = await invoke<DiffMatch[]>("get_matches", {
+        path: soffPath, matchType: type, limit: 500000, offset: 0,
+      });
+      setMatches(data);
+    }
+  };
+
+  const filtered = matches;
 
   return (
     <div className="flex h-screen">
@@ -83,7 +113,7 @@ export default function App() {
 
         {page === "soff" && (
           <>
-            <Toolbar onOpen={handleOpen} config={config} filter={filter} onFilter={setFilter} />
+            <Toolbar onOpen={handleOpen} config={config} filter={filter} onFilter={loadFilteredMatches} />
             {config ? (
               <MatchTable matches={filtered} selected={selected} onSelect={handleSelectMatch} />
             ) : (

@@ -3,6 +3,7 @@
 #include "soff/core/hooks.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/repository.hpp"
+#include "soff/diff/bb_matching.hpp"
 #include "soff/diff/ml_model.hpp"
 #include "soff/diff/propagation.hpp"
 
@@ -434,6 +435,31 @@ DiffSessionSummary run_session(
     }
 
     resolve_multimatches(results.matches);
+
+    // BB-level structural similarity refinement for partial matches
+    // Blends text-based ratio with structural BB match quality
+    for (auto& match : results.matches) {
+        if (match.kind != db::ResultKind::partial && match.kind != db::ResultKind::unreliable) {
+            continue;
+        }
+        if (match.primary_nodes < 3 || match.secondary_nodes < 3) {
+            continue;
+        }
+        try {
+            const auto bb_result = match_basic_blocks(database, match.primary, match.secondary);
+            if (bb_result.matches.empty()) continue;
+            const double structural = bb_result.similarity();
+            // Blend: 60% text ratio + 40% structural similarity
+            const double blended = 0.6 * match.ratio + 0.4 * structural;
+            match.ratio = blended;
+            // Promote to best if structural similarity is very high
+            if (blended >= 0.8 && structural >= 0.7 && match.kind == db::ResultKind::partial) {
+                match.kind = db::ResultKind::best;
+            }
+        } catch (...) {
+            // BB data may not be available; skip silently
+        }
+    }
 
     // ML model post-filter: reject low-confidence partial/unreliable matches
     if (!options.ml_model_path.empty() && std::filesystem::exists(options.ml_model_path)) {

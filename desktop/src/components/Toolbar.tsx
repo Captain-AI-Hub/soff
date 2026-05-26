@@ -12,6 +12,7 @@ const filters = [
   { key: "best", label: "Best" },
   { key: "partial", label: "Partial" },
   { key: "unreliable", label: "Unreliable" },
+  { key: "unmatched", label: "Unmatched" },
 ];
 
 export function Toolbar({ onOpen, config, filter, onFilter }: Props) {

@@ -24,6 +24,7 @@ export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Pr
   const [pairs, setPairs] = useState<DiffPair[]>([]);
   const [diffLines, setDiffLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
   useEffect(() => {
@@ -31,20 +32,25 @@ export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Pr
     async function load() {
       if (mode === "cfg") return;
       setLoading(true);
-      const col = mode.includes("pseudo") ? "get_function_pseudocode" : "get_function_assembly";
-      const [left, right] = await Promise.all([
-        invoke<string>(col, { dbPath: mainDb, address: match.primary_addr }),
-        invoke<string>(col, { dbPath: diffDb, address: match.secondary_addr }),
-      ]);
-      if (cancelled) return;
-      if (mode.startsWith("side-")) {
-        const p = await invoke<DiffPair[]>("compute_aligned_diff", { left, right });
-        if (!cancelled) setPairs(p);
-      } else {
-        const lines = await invoke<string[]>("compute_diff", { left, right });
-        if (!cancelled) setDiffLines(lines);
+      setError("");
+      try {
+        const col = mode.includes("pseudo") ? "get_function_pseudocode" : "get_function_assembly";
+        const [left, right] = await Promise.all([
+          invoke<string>(col, { dbPath: mainDb, address: match.primary_addr }),
+          invoke<string>(col, { dbPath: diffDb, address: match.secondary_addr }),
+        ]);
+        if (cancelled) return;
+        if (mode.startsWith("side-")) {
+          const p = await invoke<DiffPair[]>("compute_aligned_diff", { left, right });
+          if (!cancelled) setPairs(p);
+        } else {
+          const lines = await invoke<string[]>("compute_diff", { left, right });
+          if (!cancelled) setDiffLines(lines);
+        }
+      } catch (e: unknown) {
+        if (!cancelled) setError(String(e));
       }
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     }
     load();
     return () => { cancelled = true; };
@@ -86,6 +92,16 @@ export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Pr
       <div className="flex-1 overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center h-full"><div className="animate-glow w-2 h-2 rounded-full bg-[var(--accent)]" /></div>
+        ) : error ? (
+          <div className="flex items-center justify-center h-full p-4">
+            <div className="max-w-md text-center space-y-2">
+              <p className="text-[12px] text-red-400 font-mono break-all">{error}</p>
+              <p className="text-[10px] text-[var(--text-muted)]">
+                main_db: {mainDb}<br/>diff_db: {diffDb}<br/>
+                primary: {match.primary_addr} secondary: {match.secondary_addr}
+              </p>
+            </div>
+          </div>
         ) : mode === "cfg" ? (
           <CfgView match={match} mainDb={mainDb} diffDb={diffDb} />
         ) : mode.startsWith("side-") ? (
