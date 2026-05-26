@@ -96,6 +96,56 @@ pub fn query_matches(path: &str, match_type: &str, limit: u32, offset: u32) -> S
     rows.collect()
 }
 
+pub fn search_matches(path: &str, query: &str, match_type: &str, limit: u32) -> SqlResult<Vec<DiffMatch>> {
+    let conn = Connection::open(path)?;
+    let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+    let sql = if match_type == "all" {
+        "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
+         FROM results WHERE (name LIKE ?1 ESCAPE '\\' OR name2 LIKE ?1 ESCAPE '\\' \
+         OR address LIKE ?1 ESCAPE '\\' OR address2 LIKE ?1 ESCAPE '\\') \
+         ORDER BY ratio ASC LIMIT ?2".to_string()
+    } else {
+        format!(
+            "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
+             FROM results WHERE type = '{}' AND (name LIKE ?1 ESCAPE '\\' OR name2 LIKE ?1 ESCAPE '\\' \
+             OR address LIKE ?1 ESCAPE '\\' OR address2 LIKE ?1 ESCAPE '\\') \
+             ORDER BY ratio ASC LIMIT ?2", match_type)
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
+        Ok(DiffMatch {
+            match_type: row.get(0)?,
+            primary_addr: row.get(1)?,
+            primary_name: row.get(2)?,
+            secondary_addr: row.get(3)?,
+            secondary_name: row.get(4)?,
+            ratio: row.get(5)?,
+            nodes1: row.get(6)?,
+            nodes2: row.get(7)?,
+            description: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn search_unmatched(path: &str, query: &str, limit: u32) -> SqlResult<Vec<UnmatchedFunction>> {
+    let conn = Connection::open(path)?;
+    let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+    let mut stmt = conn.prepare(
+        "SELECT type, address, name FROM unmatched \
+         WHERE (name LIKE ?1 ESCAPE '\\' OR address LIKE ?1 ESCAPE '\\') \
+         ORDER BY line LIMIT ?2"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
+        Ok(UnmatchedFunction {
+            side: row.get(0)?,
+            address: row.get(1)?,
+            name: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn query_unmatched(path: &str, limit: u32, offset: u32) -> SqlResult<Vec<UnmatchedFunction>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(&format!(

@@ -18,6 +18,16 @@ fn get_unmatched(path: String, limit: u32, offset: u32) -> Result<Vec<UnmatchedF
 }
 
 #[tauri::command]
+fn search_matches(path: String, query: String, match_type: String, limit: u32) -> Result<Vec<DiffMatch>, String> {
+    db::search_matches(&path, &query, &match_type, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn search_unmatched(path: String, query: String, limit: u32) -> Result<Vec<UnmatchedFunction>, String> {
+    db::search_unmatched(&path, &query, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_function_assembly(db_path: String, address: String) -> Result<String, String> {
     db::query_function_column(&db_path, &address, "assembly").map_err(|e| e.to_string())
 }
@@ -364,6 +374,8 @@ pub fn run() {
             open_soff,
             get_matches,
             get_unmatched,
+            search_matches,
+            search_unmatched,
             get_function_assembly,
             get_function_pseudocode,
             get_function_info,

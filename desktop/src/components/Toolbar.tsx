@@ -5,6 +5,8 @@ interface Props {
   config: SoffConfig | null;
   filter: string;
   onFilter: (f: string) => void;
+  searchQuery: string;
+  onSearch: (q: string) => void;
 }
 
 const filters = [
@@ -15,7 +17,7 @@ const filters = [
   { key: "unmatched", label: "Unmatched" },
 ];
 
-export function Toolbar({ onOpen, config, filter, onFilter }: Props) {
+export function Toolbar({ onOpen, config, filter, onFilter, searchQuery, onSearch }: Props) {
   return (
     <div className="shrink-0 bg-[var(--bg-secondary)] border-b border-[var(--border)] select-none">
       <div className="flex items-center h-12 px-4 gap-4">
@@ -30,7 +32,6 @@ export function Toolbar({ onOpen, config, filter, onFilter }: Props) {
 
         {config && (
           <>
-            {/* Separator */}
             <div className="w-px h-6 bg-[var(--border)]" />
 
             {/* Filter tabs */}
@@ -49,6 +50,19 @@ export function Toolbar({ onOpen, config, filter, onFilter }: Props) {
                 </button>
               ))}
             </div>
+
+            <div className="w-px h-6 bg-[var(--border)]" />
+
+            {/* Search */}
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => onSearch(e.target.value)}
+              placeholder="Search function..."
+              className="px-3 py-1.5 text-xs w-52 bg-[var(--bg-primary)] border border-[var(--border)]
+                         rounded-md text-[var(--text-primary)] placeholder:text-[var(--text-muted)]
+                         focus:outline-none focus:border-[var(--accent)] transition-colors"
+            />
 
             {/* Right side stats */}
             <div className="ml-auto flex items-center gap-5 text-xs">

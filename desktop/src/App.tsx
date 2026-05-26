@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
@@ -46,6 +46,8 @@ export default function App() {
   const [filter, setFilter] = useState("all");
   const [page, setPage] = useState<Page>("analyze");
   const [soffPath, setSoffPath] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleOpen = async () => {
     const path = await open({
@@ -99,6 +101,40 @@ export default function App() {
     }
   };
 
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!soffPath) return;
+    if (!query.trim()) {
+      // Empty search: reload current filter
+      searchTimer.current = setTimeout(() => loadFilteredMatches(filter), 100);
+      return;
+    }
+    searchTimer.current = setTimeout(async () => {
+      if (filter === "unmatched") {
+        const data = await invoke<UnmatchedFunction[]>("search_unmatched", {
+          path: soffPath, query: query.trim(), limit: 10000,
+        });
+        setMatches(data.map((u) => ({
+          match_type: u.side,
+          primary_addr: u.side === "primary" ? u.address : "",
+          primary_name: u.side === "primary" ? u.name : "",
+          secondary_addr: u.side === "secondary" ? u.address : "",
+          secondary_name: u.side === "secondary" ? u.name : "",
+          ratio: 0,
+          nodes1: 0,
+          nodes2: 0,
+          description: "Unmatched " + u.side,
+        })));
+      } else {
+        const data = await invoke<DiffMatch[]>("search_matches", {
+          path: soffPath, query: query.trim(), matchType: filter, limit: 10000,
+        });
+        setMatches(data);
+      }
+    }, 250);
+  };
+
   const filtered = matches;
 
   return (
@@ -113,7 +149,7 @@ export default function App() {
 
         {page === "soff" && (
           <>
-            <Toolbar onOpen={handleOpen} config={config} filter={filter} onFilter={loadFilteredMatches} />
+            <Toolbar onOpen={handleOpen} config={config} filter={filter} onFilter={loadFilteredMatches} searchQuery={searchQuery} onSearch={handleSearch} />
             {config ? (
               <MatchTable matches={filtered} selected={selected} onSelect={handleSelectMatch} />
             ) : (
