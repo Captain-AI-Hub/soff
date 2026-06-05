@@ -20,6 +20,8 @@ struct DiffSessionOptions
     SqlRunnerOptions sql;
     PropagationOptions propagation;
     bool auto_detect_same_processor = true;
+    int max_fixed_point_iterations = 2;
+    double fixed_point_min_delta_ratio = 0.005;
     std::filesystem::path ml_model_path;
     DiffHooks* hooks = nullptr;
 };

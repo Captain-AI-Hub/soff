@@ -2,6 +2,7 @@
 
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
+#include "soff/diff/function_cache.hpp"
 #include "soff/diff/ratio.hpp"
 
 #include <cstddef>
@@ -22,6 +23,8 @@ struct PropagationOptions
     double related_min_ratio = 0.8;
     int max_functions_per_gap = 40;
     bool same_processor = true;
+    const FunctionCache* primary_cache = nullptr;
+    const FunctionCache* secondary_cache = nullptr;
 };
 
 struct PropagationStats
@@ -46,7 +49,9 @@ std::size_t find_same_name(
     boost::unordered_flat_set<Address>& matched_primary,
     boost::unordered_flat_set<Address>& matched_secondary,
     double min_ratio,
-    bool same_processor);
+    bool same_processor,
+    const FunctionCache* primary_cache = nullptr,
+    const FunctionCache* secondary_cache = nullptr);
 
 std::size_t find_locally_affine_functions(
     db::Database& database,

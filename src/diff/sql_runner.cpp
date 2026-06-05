@@ -1,6 +1,7 @@
 #include "soff/diff/sql_runner.hpp"
 
 #include "soff/core/hooks.hpp"
+#include "soff/core/perf.hpp"
 #include "soff/core/thread_pool.hpp"
 #include "soff/diff/heuristics.hpp"
 #include "soff/diff/ratio.hpp"
@@ -74,6 +75,7 @@ std::vector<db::QueryRow> query_with_controls(
     }
 
     try {
+        soff::perf::ScopedTimer timer("sql.query");
         auto rows = database.query_rows(sql);
         database.clear_progress_handler();
         return rows;
@@ -279,13 +281,30 @@ std::size_t intersection_size(std::vector<std::string> left, std::vector<std::st
     return out.size();
 }
 
-double deep_ratio_bonus(db::Database& database, const CandidateRow& candidate, bool same_processor)
+double deep_ratio_bonus(db::Database& database, const CandidateRow& candidate, const SqlRunnerOptions& options)
 {
+    if (options.primary_cache != nullptr && options.secondary_cache != nullptr) {
+        const auto primary = options.primary_cache->by_address.find(candidate.primary);
+        const auto secondary = options.secondary_cache->by_address.find(candidate.secondary);
+        if (primary != options.primary_cache->by_address.end()
+            && secondary != options.secondary_cache->by_address.end()) {
+            soff::perf::add_counter("ratio.deep_bonus.cache_hit");
+            const auto& left = primary->second;
+            const auto& right = secondary->second;
+            double bonus = 0.0;
+            if (!left.source_file.empty() && left.source_file == right.source_file) bonus += 0.05;
+            if (!left.pseudocode_primes.empty() && left.pseudocode_primes == right.pseudocode_primes) bonus += 0.10;
+            if (!left.constants.empty() && left.constants == right.constants) bonus += 0.05;
+            return std::min(0.20, bonus);
+        }
+    }
+    soff::perf::add_counter("ratio.deep_bonus.sql_fallback");
+
     const auto main_rows = database.query_rows(
-        "select source_file, pseudocode_primes, indegree, outdegree, switches, cyclomatic_complexity, constants "
+        "select source_file, switches, constants "
         "from functions where address = '" + std::to_string(candidate.primary) + "' limit 1");
     const auto diff_rows = database.query_rows(
-        "select source_file, pseudocode_primes, indegree, outdegree, switches, cyclomatic_complexity, constants "
+        "select source_file, switches, constants "
         "from diff.functions where address = '" + std::to_string(candidate.secondary) + "' limit 1");
     if (main_rows.empty() || diff_rows.empty()) {
         return 0.0;
@@ -299,84 +318,33 @@ double deep_ratio_bonus(db::Database& database, const CandidateRow& candidate, b
         score += 0.001;
     }
     // pseudocode_primes
-    if (!left[1].empty() && left[1] == right[1]) {
+    if (!candidate.pseudo_primes1.empty() && candidate.pseudo_primes1 == candidate.pseudo_primes2) {
         score += 0.001;
     }
     // indegree
-    if (left[2] == right[2] && parse_int_or_zero(left[2]) != 0) {
+    if (candidate.primary_indegree == candidate.secondary_indegree && candidate.primary_indegree != 0) {
         score += 0.001;
     }
     // outdegree
-    if (left[3] == right[3] && parse_int_or_zero(left[3]) != 0) {
+    if (candidate.primary_outdegree == candidate.secondary_outdegree && candidate.primary_outdegree != 0) {
         score += 0.001;
     }
     // switches
-    if (left[4] == right[4] && left[4] != "[]" && !left[4].empty()) {
+    if (left[1] == right[1] && left[1] != "[]" && !left[1].empty()) {
         score += 0.003;
     }
     // cyclomatic_complexity
-    if (left[5] == right[5] && parse_int_or_zero(left[5]) != 0) {
+    if (candidate.primary_cc == candidate.secondary_cc && candidate.primary_cc != 0) {
         score += 0.001;
     }
     // constants: per-constant accumulation (same_cpu: +0.006, diff_cpu: +0.008)
-    if (left[6] != "[]" && !left[6].empty() && !right[6].empty()) {
-        const auto left_consts = parse_jsonish_array_values(left[6]);
-        const auto right_consts = parse_jsonish_array_values(right[6]);
+    if (left[2] != "[]" && !left[2].empty() && !right[2].empty()) {
+        const auto left_consts = parse_jsonish_array_values(left[2]);
+        const auto right_consts = parse_jsonish_array_values(right[2]);
         const auto common = intersection_size(left_consts, right_consts);
-        score += static_cast<double>(common) * (same_processor ? 0.006 : 0.008);
+        score += static_cast<double>(common) * (options.same_processor ? 0.006 : 0.008);
     }
-    return score;
-}
-
-double compute_ratio(db::Database& database, const CandidateRow& candidate, bool same_processor, bool relaxed_ratio = false)
-{
-    if (equal_non_empty_ratio(candidate.bytes_hash1, candidate.bytes_hash2) == 1.0) {
-        return 1.0;
-    }
-
-    // In relaxed mode with matching high md_index, accept immediately
-    if (relaxed_ratio && candidate.md1 == candidate.md2 && candidate.md1 > 10.0) {
-        return 1.0;
-    }
-
-    const double v1 = !candidate.pseudo1.empty() && !candidate.pseudo2.empty()
-        ? candidate_text_ratio("", "", "", "", "", "", candidate.stripped_pseudocode1, candidate.stripped_pseudocode2)
-        : 0.0;
-    const double v2 = candidate_text_ratio("", "", "", "", candidate.stripped_assembly1, candidate.stripped_assembly2, "", "");
-
-    // v3: AST prime difference ratio
-    double v3 = 0.0;
-    if (!candidate.pseudo_primes1.empty() && !candidate.pseudo_primes2.empty()) {
-        v3 = ast_prime_difference_ratio(candidate.pseudo_primes1, candidate.pseudo_primes2);
-    }
-
-    double v4 = 0.0;
-    if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
-        // MD Index match: boost the average of text signals by 0.1
-        const double avg = (v1 + v2 + v3) / 3.0;
-        v4 = std::min(avg + 0.1, 1.0);
-    }
-    const double v5 = candidate_text_ratio("", "", "", "", candidate.stripped_micro1, candidate.stripped_micro2, "", "");
-    if (v5 == 1.0) {
-        return 1.0;
-    }
-
-    double ratio = std::max({v1, v2, v3, v4, v5});
-    if (ratio == 1.0 && candidate.md1 != candidate.md2) {
-        ratio = 0.0;
-        for (const auto value : {v1, v2, v3, v4, v5}) {
-            if (value != 1.0 && value > ratio) {
-                ratio = value;
-            }
-        }
-    }
-
-    if (ratio < 1.0) {
-        const auto score = deep_ratio_bonus(database, candidate, same_processor);
-        ratio = ratio + score < 1.0 ? ratio + score : 0.99;
-    }
-
-    return std::min(1.0, ratio);
+    return std::min(0.20, score);
 }
 
 double compute_ratio_fast(const CandidateRow& candidate)
@@ -402,13 +370,17 @@ double compute_ratio_fast(const CandidateRow& candidate)
         v4 = std::min(avg + 0.1, 1.0);
     }
     const double v5 = candidate_text_ratio("", "", "", "", candidate.stripped_micro1, candidate.stripped_micro2, "", "");
-    if (v5 == 1.0) return 1.0;
+    if (v5 == 1.0) {
+        return 1.0;
+    }
 
     double ratio = std::max({v1, v2, v3, v4, v5});
     if (ratio == 1.0 && candidate.md1 != candidate.md2) {
         ratio = 0.0;
         for (const auto value : {v1, v2, v3, v4, v5}) {
-            if (value != 1.0 && value > ratio) ratio = value;
+            if (value != 1.0 && value > ratio) {
+                ratio = value;
+            }
         }
     }
     return ratio;
@@ -585,7 +557,11 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_exact(db::Database& database, cons
                 continue;
             }
 
-            const auto candidate = parse_candidate(row);
+            CandidateRow candidate;
+            {
+                soff::perf::ScopedTimer timer("sql.parse_candidate");
+                candidate = parse_candidate(row);
+            }
             const auto outcome = append_match(
                 result,
                 candidate,
@@ -676,16 +652,24 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             std::vector<std::future<void>> futures;
             futures.reserve(rows.size());
             for (std::size_t idx = 0; idx < rows.size(); ++idx) {
-                if (rows[idx].size() < 45) continue;
-                scored[idx].candidate = parse_candidate(rows[idx]);
+                if (rows[idx].size() < 45) {
+                    continue;
+                }
+                {
+                    soff::perf::ScopedTimer timer("sql.parse_candidate");
+                    scored[idx].candidate = parse_candidate(rows[idx]);
+                }
                 scored[idx].valid = true;
                 if (heuristic.ratio_mode != RatioMode::no_false_positives) {
                     futures.push_back(pool.post([&scored, idx]() {
+                        soff::perf::ScopedTimer timer("ratio.compute");
                         scored[idx].ratio = compute_ratio_fast(scored[idx].candidate);
                     }));
                 }
             }
-            for (auto& f : futures) f.get();
+            for (auto& f : futures) {
+                f.get();
+            }
         }
 
         // Phase 1.5: Disambiguation — when multiple candidates share the same
@@ -702,7 +686,9 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             });
             for (auto idx : order) {
                 auto& sc = scored[idx];
-                if (!sc.valid) continue;
+                if (!sc.valid) {
+                    continue;
+                }
                 const auto p = sc.candidate.primary;
                 const auto s = sc.candidate.secondary;
                 const bool p_seen = best_primary.find(p) != best_primary.end();
@@ -733,7 +719,11 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             }
 
             if (heuristic.ratio_mode != RatioMode::no_false_positives && ratio < 1.0 && ratio >= minimum_ratio - 0.05) {
-                const auto bonus = deep_ratio_bonus(database, candidate, options.same_processor);
+                double bonus = 0.0;
+                {
+                    soff::perf::ScopedTimer timer("ratio.deep_bonus");
+                    bonus = deep_ratio_bonus(database, candidate, options);
+                }
                 ratio = ratio + bonus < 1.0 ? ratio + bonus : 0.99;
             }
 

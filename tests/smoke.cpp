@@ -1,11 +1,13 @@
 #include "soff/analysis/model.hpp"
 #include "soff/core/hooks.hpp"
+#include "soff/core/perf.hpp"
 #include <boost/unordered/unordered_flat_set.hpp>
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
 #include "soff/db/schema.hpp"
 #include "soff/db/repository.hpp"
 #include "soff/diff/heuristics.hpp"
+#include "soff/diff/function_cache.hpp"
 #include "soff/diff/ml_features.hpp"
 #include "soff/diff/patch_diff.hpp"
 #include "soff/diff/propagation.hpp"
@@ -18,12 +20,102 @@
 #include <cassert>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
-int main()
+namespace {
+
+bool has_arg(int argc, char** argv, const std::string& expected)
 {
+    for (auto index = 1; index < argc; ++index) {
+        if (argv[index] == expected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int run_perf_enabled_self_test()
+{
+    assert(soff::perf::enabled());
+    soff::perf::reset();
+    assert(soff::perf::render_report().empty());
+
+    soff::perf::add_counter("test.counter", 5);
+    soff::perf::add_counter("test.counter", 3);
+    {
+        soff::perf::ScopedTimer timer("test.timer");
+    }
+
+    const auto report = soff::perf::render_report();
+    assert(report.find("counter test.counter=8\n") != std::string::npos);
+    assert(report.find("duration_ns test.timer=") != std::string::npos);
+
+    soff::perf::reset();
+    assert(soff::perf::render_report().empty());
+    return 0;
+}
+
+std::string shell_quote(const std::string& value)
+{
+    return '"' + value + '"';
+}
+
+std::string sql_quote(const std::string& value)
+{
+    auto quoted = std::string{"'"};
+    for (const auto character : value) {
+        if (character == '\'') {
+            quoted += "''";
+        } else {
+            quoted += character;
+        }
+    }
+    quoted += '\'';
+    return quoted;
+}
+
+bool has_index_with_columns(
+    soff::db::Database& database,
+    const std::string& table,
+    const std::vector<std::string>& expected_columns)
+{
+    for (const auto& index_row : database.query_rows("pragma index_list(" + sql_quote(table) + ")")) {
+        assert(index_row.size() >= 2);
+        std::vector<std::string> actual_columns;
+        for (const auto& column_row : database.query_rows("pragma index_info(" + sql_quote(index_row[1]) + ")")) {
+            assert(column_row.size() >= 3);
+            actual_columns.push_back(column_row[2]);
+        }
+        if (actual_columns == expected_columns) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int run_perf_enabled_subprocess(const char* executable_path)
+{
+#ifdef _WIN32
+    const auto command = std::string("set SOFF_PERF=1&& ") + shell_quote(executable_path) + " --perf-enabled-self-test";
+#else
+    const auto command = std::string("SOFF_PERF=1 ") + shell_quote(executable_path) + " --perf-enabled-self-test";
+#endif
+    return std::system(command.c_str());
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    if (has_arg(argc, argv, "--perf-enabled-self-test")) {
+        return run_perf_enabled_self_test();
+    }
+
     soff::ProgramSnapshot snapshot;
     snapshot.input_path = "sample.exe";
     snapshot.architecture = "metapc";
@@ -177,12 +269,50 @@ int main()
     }
     assert(heuristic_issues.empty());
 
+    assert(!soff::perf::enabled());
+    {
+        soff::perf::ScopedTimer timer("test.disabled_timer");
+        soff::perf::add_counter("test.disabled_counter", 1);
+    }
+    const auto disabled_report = soff::perf::render_report();
+    assert(disabled_report.empty());
+    assert(run_perf_enabled_subprocess(argv[0]) == 0);
+
     const auto db_path = std::filesystem::absolute(std::filesystem::path("build") / "soff_smoke.sqlite");
     std::filesystem::create_directories(db_path.parent_path());
     soff::SnapshotRepository repository;
+
+    auto duplicate_rva_snapshot = snapshot;
+    auto duplicate_rva_function = duplicate_rva_snapshot.functions[0];
+    duplicate_rva_function.address = 0x501000;
+    duplicate_rva_function.name = "same_rva_different_address";
+    duplicate_rva_function.segment_rva = 0x2000;
+    duplicate_rva_snapshot.functions.push_back(std::move(duplicate_rva_function));
+    const auto duplicate_rva_path = std::filesystem::absolute(
+        std::filesystem::path("build") / "soff_duplicate_rva.sqlite");
+    assert(repository.save(duplicate_rva_snapshot, duplicate_rva_path));
+    const auto duplicate_rva_loaded = repository.load(duplicate_rva_path);
+    assert(duplicate_rva_loaded.functions.size() == 2);
+
     assert(repository.save(snapshot, db_path));
     soff::db::Database smoke_db;
     smoke_db.open(db_path);
+    const auto primary_cache = soff::diff::load_function_cache(smoke_db, "main");
+    assert(primary_cache.by_address.find(0x401000) != primary_cache.by_address.end());
+    assert(primary_cache.by_address.at(0x401000).name == "start");
+    assert(primary_cache.by_name.find("start") != primary_cache.by_name.end());
+    auto invalid_schema_threw = false;
+    try {
+        (void)soff::diff::load_function_cache(smoke_db, "123bad");
+    } catch (const std::runtime_error&) {
+        invalid_schema_threw = true;
+    }
+    assert(invalid_schema_threw);
+    smoke_db.execute("insert into functions (name, address) values ('', '4210752')");
+    const auto empty_name_cache = soff::diff::load_function_cache(smoke_db, "main");
+    assert(empty_name_cache.by_name.find("") == empty_name_cache.by_name.end());
+    assert(empty_name_cache.by_address.find(4210752) != empty_name_cache.by_address.end());
+    smoke_db.execute("delete from functions where name = '' and address = '4210752'");
     auto version_stmt = smoke_db.prepare("select value from version limit 1");
     assert(version_stmt.step());
     assert(version_stmt.column_text(0) == soff::SnapshotRepository::soff_version_value);
@@ -238,6 +368,9 @@ int main()
     diaphora_version_db.open(diaphora_version_path);
     assert(diaphora_version_db.query_text("select value from version limit 1") == soff::SnapshotRepository::diaphora_version_value);
     assert(diaphora_version_db.query_int("select count(*) from sqlite_master where type = 'index'") > 0);
+    assert(has_index_with_columns(diaphora_version_db, "functions", {"address", "bytes_hash"}));
+    assert(has_index_with_columns(diaphora_version_db, "functions", {"md_index", "nodes", "edges"}));
+    assert(has_index_with_columns(diaphora_version_db, "callgraph", {"func_id", "type", "address"}));
     diaphora_version_db.close();
 
     const auto incremental_path = std::filesystem::absolute(
@@ -719,6 +852,45 @@ int main()
         const auto prop_summary = soff::diff::DiffSession{prop_options}.run_all(
             db_path, db_path, prop_result_path);
         assert(prop_summary.results.best > 0);
+    }
+
+    {
+        soff::diff::DiffSessionOptions zero_fp_options;
+        zero_fp_options.max_fixed_point_iterations = 0;
+        zero_fp_options.propagation.enabled = true;
+        const auto zero_fp_result_path = std::filesystem::absolute(
+            std::filesystem::path("build") / "soff_zero_fixed_point_test.soff");
+        const auto zero_fp_summary = soff::diff::DiffSession{zero_fp_options}.run_all(
+            db_path, db_path, zero_fp_result_path);
+        assert(zero_fp_summary.propagation.iterations_run == 0);
+    }
+
+    {
+        soff::diff::DiffSessionOptions threshold_options;
+        threshold_options.config.speedup_stripped_binaries_min_percent = 101.0;
+        threshold_options.fixed_point_min_delta_ratio = 1.0;
+        threshold_options.propagation.enabled = true;
+        const auto threshold_result_path = std::filesystem::absolute(
+            std::filesystem::path("build") / "soff_threshold_fixed_point_test.soff");
+        const auto threshold_summary = soff::diff::DiffSession{threshold_options}.run_all(
+            db_path, db_path, threshold_result_path);
+        assert(threshold_summary.results.best > 0);
+        assert(threshold_summary.propagation.iterations_run >= 1);
+    }
+
+    {
+        soff::diff::DiffSessionOptions invalid_fp_options;
+        invalid_fp_options.fixed_point_min_delta_ratio = -1.0;
+        const auto invalid_fp_result_path = std::filesystem::absolute(
+            std::filesystem::path("build") / "soff_invalid_fixed_point_test.soff");
+        bool threw_invalid_argument = false;
+        try {
+            (void)soff::diff::DiffSession{invalid_fp_options}.run_all(
+                db_path, db_path, invalid_fp_result_path);
+        } catch (const std::invalid_argument&) {
+            threw_invalid_argument = true;
+        }
+        assert(threw_invalid_argument);
     }
     std::cout << "propagation: session integration test passed\n";
 

@@ -1,9 +1,11 @@
 #include "soff/diff/session.hpp"
 
 #include "soff/core/hooks.hpp"
+#include "soff/core/perf.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/repository.hpp"
 #include "soff/diff/bb_matching.hpp"
+#include "soff/diff/function_cache.hpp"
 #include "soff/diff/ml_model.hpp"
 #include "soff/diff/propagation.hpp"
 
@@ -11,6 +13,9 @@
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <algorithm>
 #include <charconv>
+#include <cmath>
+#include <filesystem>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -88,6 +93,27 @@ void cleanup_matches(
     }
     matches = std::move(cleaned);
 }
+
+struct AddressPairKey
+{
+    Address primary = 0;
+    Address secondary = 0;
+
+    bool operator==(const AddressPairKey& other) const noexcept
+    {
+        return primary == other.primary && secondary == other.secondary;
+    }
+};
+
+struct AddressPairHash
+{
+    std::size_t operator()(const AddressPairKey& key) const noexcept
+    {
+        std::size_t seed = std::hash<Address>{}(key.primary);
+        seed ^= std::hash<Address>{}(key.secondary) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
 
 void resolve_multimatches(std::vector<db::ResultMatch>& matches)
 {
@@ -272,6 +298,46 @@ std::vector<db::ResultMatch> find_equal_matches(db::Database& database)
     return matches;
 }
 
+std::vector<db::ResultMatch> find_md_index_matches(
+    const FunctionCache& primary_cache,
+    const FunctionCache& secondary_cache,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary)
+{
+    boost::unordered_flat_map<std::string, Address> primary_by_md;
+    boost::unordered_flat_set<std::string> duplicate_md;
+    for (const auto& [address, function] : primary_cache.by_address) {
+        if (function.md_index.empty() || function.nodes < 3) continue;
+        auto [it, inserted] = primary_by_md.emplace(function.md_index, address);
+        if (!inserted) duplicate_md.emplace(function.md_index);
+    }
+    std::vector<db::ResultMatch> matches;
+    for (const auto& [secondary_address, secondary] : secondary_cache.by_address) {
+        if (secondary.md_index.empty() || duplicate_md.find(secondary.md_index) != duplicate_md.end()) continue;
+        const auto primary = primary_by_md.find(secondary.md_index);
+        if (primary == primary_by_md.end()) continue;
+        const auto primary_function = primary_cache.by_address.find(primary->second);
+        if (primary_function == primary_cache.by_address.end()) continue;
+        const auto& left = primary_function->second;
+        if (left.nodes > secondary.nodes + 1 || secondary.nodes > left.nodes + 1) continue;
+        if (matched_primary.count(primary->second) || matched_secondary.count(secondary_address)) continue;
+        db::ResultMatch match;
+        match.kind = db::ResultKind::best;
+        match.primary = primary->second;
+        match.primary_name = left.name;
+        match.secondary = secondary_address;
+        match.secondary_name = secondary.name;
+        match.ratio = 1.0;
+        match.primary_nodes = left.nodes;
+        match.secondary_nodes = secondary.nodes;
+        match.description = "Same unique MD index";
+        matches.push_back(std::move(match));
+        matched_primary.insert(primary->second);
+        matched_secondary.insert(secondary_address);
+    }
+    return matches;
+}
+
 DiffSessionSummary run_session(
     const DiffSessionOptions& options,
     const std::filesystem::path& main_db,
@@ -279,13 +345,22 @@ DiffSessionSummary run_session(
     const std::filesystem::path& output_db,
     bool exact_only)
 {
+    if (!std::isfinite(options.fixed_point_min_delta_ratio) || options.fixed_point_min_delta_ratio < 0.0) {
+        throw std::invalid_argument("fixed_point_min_delta_ratio must be finite and non-negative");
+    }
+
     db::Database database;
     database.open(main_db);
 
     SnapshotRepository snapshot_repository;
     snapshot_repository.attach_diff(database, diff_db);
 
+    auto primary_cache = load_function_cache(database, "main");
+    auto secondary_cache = load_function_cache(database, "diff");
+
     auto sql_options = options.sql;
+    sql_options.primary_cache = &primary_cache;
+    sql_options.secondary_cache = &secondary_cache;
     if (options.auto_detect_same_processor) {
         sql_options.same_processor = detect_same_processor(database);
     }
@@ -296,7 +371,8 @@ DiffSessionSummary run_session(
     // Auto-tuning: disable slow heuristics for large databases
     const auto primary_count = database.query_int("select count(*) from functions");
     const auto secondary_count = database.query_int("select count(*) from diff.functions");
-    const auto total_functions = static_cast<std::size_t>(primary_count + secondary_count);
+    const auto total_functions = std::max<std::size_t>(
+        1, static_cast<std::size_t>(primary_count + secondary_count));
     if (total_functions >= options.config.min_functions_to_disable_slow) {
         sql_options.enable_slow = false;
     }
@@ -369,7 +445,8 @@ DiffSessionSummary run_session(
     boost::unordered_flat_set<Address> pre_matched_s = sql_options.pre_matched_secondary;
     if (!exact_only && !is_stripped_fast_path) {
         find_same_name(database, pre_same_name_matches, pre_matched_p, pre_matched_s,
-            options.propagation.same_name_min_ratio, sql_options.same_processor);
+            options.propagation.same_name_min_ratio, sql_options.same_processor,
+            &primary_cache, &secondary_cache);
         for (const auto& m : pre_same_name_matches) {
             sql_options.pre_matched_primary.insert(m.primary);
             sql_options.pre_matched_secondary.insert(m.secondary);
@@ -389,6 +466,18 @@ DiffSessionSummary run_session(
         }
     }
 
+    db::DiffResultSet results;
+    results.main_db = main_db.string();
+    results.diff_db = diff_db.string();
+
+    if (!exact_only) {
+        auto md_matches = find_md_index_matches(primary_cache, secondary_cache, pre_matched_p, pre_matched_s);
+        results.matches.insert(results.matches.end(), md_matches.begin(), md_matches.end());
+        soff::perf::add_counter("diff.md_index_fast_path.matches", md_matches.size());
+        sql_options.pre_matched_primary = pre_matched_p;
+        sql_options.pre_matched_secondary = pre_matched_s;
+    }
+
     SqlHeuristicRunResult run_result;
     if (is_stripped_fast_path || is_patchdiff_fast_path) {
         // Skip SQL heuristics entirely
@@ -398,11 +487,9 @@ DiffSessionSummary run_session(
             : runner.run_all(database, sql_options);
     }
 
-    db::DiffResultSet results;
-    results.main_db = main_db.string();
-    results.diff_db = diff_db.string();
     if (!exact_only) {
-        results.matches = std::move(equal_matches);
+        results.matches.insert(results.matches.end(),
+            equal_matches.begin(), equal_matches.end());
         results.matches.insert(results.matches.end(),
             pre_same_name_matches.begin(), pre_same_name_matches.end());
         results.matches.insert(results.matches.end(),
@@ -425,23 +512,36 @@ DiffSessionSummary run_session(
 
     // Fixed-point iteration: heuristics → propagation → repeat until convergence
     PropagationStats propagation_stats;
-    constexpr int max_fixed_point_iterations = 3;
+    const int max_fixed_point_iterations = std::max(0, options.max_fixed_point_iterations);
     for (int fp_iter = 0; fp_iter < max_fixed_point_iterations && !exact_only && options.propagation.enabled; ++fp_iter) {
-        const auto matches_before = results.matches.size();
+        const auto before_propagation_count = results.matches.size();
 
         auto prop_options = options.propagation;
         prop_options.same_processor = sql_options.same_processor;
         prop_options.enable_slow = sql_options.enable_slow;
+        prop_options.primary_cache = &primary_cache;
+        prop_options.secondary_cache = &secondary_cache;
         propagation_stats = run_propagation(
             database, results.matches,
             matched_primary, matched_secondary, prop_options);
         cleanup_matches(results.matches, matched_primary, matched_secondary);
 
         const auto matches_after = results.matches.size();
-        if (matches_after == matches_before) break;
+        const auto propagation_delta = matches_after > before_propagation_count
+            ? matches_after - before_propagation_count
+            : std::size_t{0};
+        if (propagation_delta == 0) break;
+
+        const double delta_ratio = static_cast<double>(propagation_delta)
+            / static_cast<double>(total_functions);
 
         // Propagation found new matches — re-run heuristics with updated exclusions
         if (fp_iter < max_fixed_point_iterations - 1 && !is_stripped_fast_path && !is_patchdiff_fast_path) {
+            if (delta_ratio < options.fixed_point_min_delta_ratio) {
+                soff::perf::add_counter("diff.fixed_point.skip_small_delta");
+                break;
+            }
+            soff::perf::add_counter("diff.fixed_point.rerun");
             sql_options.pre_matched_primary = matched_primary;
             sql_options.pre_matched_secondary = matched_secondary;
             auto rerun = runner.run_all(database, sql_options);
@@ -459,15 +559,33 @@ DiffSessionSummary run_session(
 
     // BB-level structural similarity refinement for partial matches
     // Blends text-based ratio with structural BB match quality
+    boost::unordered_flat_map<AddressPairKey, BasicBlockMatchResult, AddressPairHash> bb_cache;
     for (auto& match : results.matches) {
         if (match.kind != db::ResultKind::partial && match.kind != db::ResultKind::unreliable) {
+            continue;
+        }
+        if (match.ratio < 0.30) {
+            soff::perf::add_counter("diff.bb_matching.skip_low_ratio");
+            continue;
+        }
+        if (match.kind == db::ResultKind::unreliable && match.ratio >= 0.95) {
+            soff::perf::add_counter("diff.bb_matching.skip_high_unreliable");
             continue;
         }
         if (match.primary_nodes < 3 || match.secondary_nodes < 3) {
             continue;
         }
         try {
-            const auto bb_result = match_basic_blocks(database, match.primary, match.secondary);
+            soff::perf::add_counter("diff.bb_matching.attempt");
+            const AddressPairKey key{match.primary, match.secondary};
+            auto cached = bb_cache.find(key);
+            if (cached == bb_cache.end()) {
+                soff::perf::add_counter("diff.bb_matching.cache_miss");
+                cached = bb_cache.emplace(key, match_basic_blocks(database, match.primary, match.secondary)).first;
+            } else {
+                soff::perf::add_counter("diff.bb_matching.cache_hit");
+            }
+            const auto& bb_result = cached->second;
             if (bb_result.matches.empty()) continue;
             const double structural = bb_result.similarity();
             // Blend: 60% text ratio + 40% structural similarity
@@ -477,7 +595,10 @@ DiffSessionSummary run_session(
             if (blended >= 0.8 && structural >= 0.7 && match.kind == db::ResultKind::partial) {
                 match.kind = db::ResultKind::best;
             }
+        } catch (const std::bad_alloc&) {
+            throw;
         } catch (...) {
+            soff::perf::add_counter("diff.bb_matching.exception");
             // BB data may not be available; skip silently
         }
     }
@@ -529,6 +650,7 @@ DiffSessionSummary DiffSession::run_exact(
     const std::filesystem::path& diff_db,
     const std::filesystem::path& output_db) const
 {
+    soff::perf::ScopedTimer timer("diff.run_exact");
     return run_session(options_, main_db, diff_db, output_db, true);
 }
 
@@ -537,6 +659,7 @@ DiffSessionSummary DiffSession::run_all(
     const std::filesystem::path& diff_db,
     const std::filesystem::path& output_db) const
 {
+    soff::perf::ScopedTimer timer("diff.run_all");
     return run_session(options_, main_db, diff_db, output_db, false);
 }
 

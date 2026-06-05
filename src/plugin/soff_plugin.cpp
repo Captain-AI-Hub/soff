@@ -4,6 +4,7 @@
 #include "soff/core/version.hpp"
 #include "soff/core/error.hpp"
 #include "soff/core/hooks.hpp"
+#include "soff/core/perf.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
 #include "soff/db/repository.hpp"
@@ -58,6 +59,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <regex>
 #include <set>
@@ -100,6 +102,12 @@ constexpr const char* import_results_menu_path = "Soff/Import Diff Results";
 constexpr const char* local_diff_menu_path = "Soff/Local Function Diff";
 constexpr const char* options_node_name = "$ soff options";
 constexpr nodeidx_t option_export_use_decompiler = 101;
+constexpr asize_t function_reserve_min_size = 1;
+constexpr asize_t function_reserve_max_size = 1024 * 1024;
+constexpr std::size_t instruction_reserve_divisor = 4;
+constexpr std::size_t assembly_reserve_multiplier = 32;
+constexpr std::size_t stripped_assembly_reserve_multiplier = 24;
+constexpr std::size_t mnemonic_reserve_multiplier = 8;
 
 struct ExportOptions
 {
@@ -160,6 +168,33 @@ struct ExportResult
     ExportStats stats;
 };
 
+template <typename Value>
+struct PathCache
+{
+    std::filesystem::path path;
+    std::shared_ptr<const Value> value;
+
+    void clear()
+    {
+        path.clear();
+        value.reset();
+    }
+};
+
+const soff::ProgramSnapshot& load_snapshot_cached(
+    PathCache<soff::ProgramSnapshot>& cache,
+    const std::filesystem::path& path)
+{
+    if (!cache.value || cache.path != path) {
+        soff::perf::ScopedTimer timer("plugin.snapshot.load");
+        auto loaded_path = path;
+        auto value = std::make_shared<const soff::ProgramSnapshot>(soff::SnapshotRepository{}.load(path));
+        cache.path = std::move(loaded_path);
+        cache.value = std::move(value);
+    }
+    return *cache.value;
+}
+
 std::string to_string(const qstring& value)
 {
     return value.c_str() != nullptr ? value.c_str() : "";
@@ -194,6 +229,14 @@ bool parse_bool(std::string_view value, bool fallback)
         return false;
     }
     return fallback;
+}
+
+void print_perf_report_if_enabled()
+{
+    if (soff::perf::enabled()) {
+        const auto report = soff::perf::render_report();
+        msg("%s", report.c_str());
+    }
 }
 
 void read_bool_env(const char* name, bool& option)
@@ -754,9 +797,6 @@ void append_mnemonic(std::string& mnemonics, const std::string& mnemonic)
 
 void append_line(std::string& lines, const std::string& line)
 {
-    if (line.empty()) {
-        return;
-    }
     if (!lines.empty()) {
         lines.push_back('\n');
     }
@@ -1567,6 +1607,7 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
 
     mba_ranges_t ranges(function);
     hexrays_failure_t failure;
+    soff::perf::add_counter("export.hexrays.microcode.attempt");
     mba_t* mba = gen_microcode(ranges, &failure, nullptr, DECOMP_WARNINGS, MMAT_GENERATED);
     if (mba == nullptr) {
         ++hexrays.microcode_failures;
@@ -1689,6 +1730,7 @@ void extract_pseudocode_features(func_t* function, soff::FunctionFeature& featur
     }
 
     hexrays_failure_t failure;
+    soff::perf::add_counter("export.hexrays.pseudocode.attempt");
     cfuncptr_t cfunc = decompile_func(function, &failure, DECOMP_NO_WAIT);
     if (cfunc == nullptr) {
         ++hexrays.pseudocode_failures;
@@ -1748,16 +1790,24 @@ void append_unique(std::vector<std::string>& values, std::string value)
 bool is_valid_constant(std::uint64_t value, ea_t ea)
 {
     // Filter 1: too small (stack offsets, flags, small immediates)
-    if (value < 0x1000) return false;
+    if (value < 0x1000) {
+        return false;
+    }
     // Filter 2: powers of 2 (alignment values)
-    if (value != 0 && (value & (value - 1)) == 0) return false;
+    if (value != 0 && (value & (value - 1)) == 0) {
+        return false;
+    }
     // Filter 3: 0xFFFFFF00-style masks (all-ones with trailing zeros)
     const auto inverted = ~value;
-    if (inverted != 0 && (inverted & (inverted - 1)) == 0) return false;
+    if (inverted != 0 && (inverted & (inverted - 1)) == 0) {
+        return false;
+    }
     // Filter 4: has data reference (it's an address, not a constant)
     if (is_mapped(static_cast<ea_t>(value))) {
         xrefblk_t xref;
-        if (xref.first_to(static_cast<ea_t>(value), XREF_DATA)) return false;
+        if (xref.first_to(static_cast<ea_t>(value), XREF_DATA)) {
+            return false;
+        }
     }
     return true;
 }
@@ -2227,6 +2277,16 @@ bool has_data_ref_from(ea_t ea)
 soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false, bool skip_trivial_decompile = false)
 {
     soff::FunctionFeature feature;
+    const asize_t function_size = std::max<asize_t>(function_reserve_min_size, function->size());
+    const auto capped_function_size = static_cast<std::size_t>(std::min<asize_t>(function_size, function_reserve_max_size));
+    const auto estimated_instructions = std::max<std::size_t>(1, capped_function_size / instruction_reserve_divisor);
+    feature.instruction_details.reserve(estimated_instructions);
+    feature.call_references.reserve(16);
+    feature.constants.reserve(16);
+    feature.blocks.reserve(capped_function_size);
+    feature.assembly.reserve(estimated_instructions * assembly_reserve_multiplier);
+    feature.stripped_assembly.reserve(estimated_instructions * stripped_assembly_reserve_multiplier);
+    feature.mnemonics.reserve(estimated_instructions * mnemonic_reserve_multiplier);
     feature.address = static_cast<soff::Address>(function->start_ea);
     feature.rva = function->start_ea >= imagebase
         ? static_cast<soff::Address>(function->start_ea - imagebase)
@@ -2295,6 +2355,9 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     std::set<std::string> referenced_names;
     std::vector<std::pair<std::size_t, std::vector<sval_t>>> switches;
     auto mnemonics_spp = std::string("1");
+    const bool perf_enabled = soff::perf::enabled();
+    std::uint64_t switch_info_attempts = 0;
+    std::uint64_t string_xref_attempts = 0;
 
     func_item_iterator_t iterator(function);
     for (bool ok = iterator.first(); ok; ok = iterator.next_code()) {
@@ -2328,6 +2391,9 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
             kgh_hash = decimal_multiply(std::move(kgh_hash), 29);
         }
         collect_operand_name(instruction, referenced_names);
+        if (perf_enabled) {
+            ++switch_info_attempts;
+        }
         collect_switch_info(ea, switches);
         append_instruction_to_block(feature.blocks, ea);
         assembly_addresses.push_back(static_cast<soff::Address>(ea));
@@ -2352,6 +2418,9 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
 
         // Extract string constants from data references
         xrefblk_t data_xref;
+        if (perf_enabled) {
+            ++string_xref_attempts;
+        }
         for (bool has = data_xref.first_from(ea, XREF_DATA);
              has;
              has = data_xref.next_from()) {
@@ -2397,6 +2466,13 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
         }
     }
 
+    if (switch_info_attempts != 0) {
+        soff::perf::add_counter("export.switch_info.attempt", switch_info_attempts);
+    }
+    if (string_xref_attempts != 0) {
+        soff::perf::add_counter("export.string_xref.attempt", string_xref_attempts);
+    }
+
     feature.indegree = count_incoming_code_refs(function->start_ea);
     feature.outdegree = feature.call_references.size();
     feature.names = json_string_array(referenced_names);
@@ -2431,6 +2507,7 @@ ExportResult build_ida_snapshot(
     const std::filesystem::path* crash_path = nullptr,
     const std::filesystem::path* output_path = nullptr)
 {
+    soff::perf::ScopedTimer timer("export.total");
     ExportResult result;
     auto& snapshot = result.snapshot;
     snapshot.architecture = to_string(inf_get_procname());
@@ -2448,10 +2525,10 @@ ExportResult build_ida_snapshot(
     const bool incremental_save = output_path != nullptr;
     soff::SnapshotRepository repository;
     std::vector<soff::FunctionFeature> pending_functions;
-    constexpr std::size_t batch_size = 256;
+    constexpr std::size_t export_batch_size = 512;
     if (incremental_save) {
         repository.begin_incremental_save(snapshot, *output_path, !options.resume_existing_database);
-        pending_functions.reserve(batch_size);
+        pending_functions.reserve(export_batch_size);
     }
     auto existing_addresses = options.resume_existing_database && incremental_save
         ? load_exported_function_addresses(*output_path)
@@ -2467,6 +2544,7 @@ ExportResult build_ida_snapshot(
     struct AsyncWriter {
         soff::SnapshotRepository& repository;
         const std::filesystem::path& output_path;
+        std::size_t reserve_size;
         std::mutex mutex;
         std::condition_variable cv;
         std::queue<std::vector<soff::FunctionFeature>> queue;
@@ -2474,8 +2552,8 @@ ExportResult build_ida_snapshot(
         std::size_t batch_commits = 0;
         std::exception_ptr error;
 
-        AsyncWriter(soff::SnapshotRepository& repo, const std::filesystem::path& path)
-            : repository(repo), output_path(path) {}
+        AsyncWriter(soff::SnapshotRepository& repo, const std::filesystem::path& path, std::size_t batch_size)
+            : repository(repo), output_path(path), reserve_size(batch_size) {}
 
         void run() {
             while (true) {
@@ -2506,7 +2584,7 @@ ExportResult build_ida_snapshot(
             }
             cv.notify_one();
             pending.clear();
-            pending.reserve(256);
+            pending.reserve(reserve_size);
         }
 
         void finish() {
@@ -2526,7 +2604,7 @@ ExportResult build_ida_snapshot(
     std::unique_ptr<AsyncWriter> writer;
     std::thread writer_thread;
     if (incremental_save) {
-        writer = std::make_unique<AsyncWriter>(repository, *output_path);
+        writer = std::make_unique<AsyncWriter>(repository, *output_path, export_batch_size);
         writer_thread = std::thread([&writer]() { writer->run(); });
     }
 
@@ -2635,14 +2713,18 @@ ExportResult build_ida_snapshot(
                     continue;
                 }
             }
-            auto feature = read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions);
+            soff::FunctionFeature feature;
+            {
+                soff::perf::ScopedTimer timer("export.read_function");
+                feature = read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions);
+            }
             // Export hook: after_export_function
             if (options.hooks != nullptr) {
                 options.hooks->after_export_function(feature);
             }
             if (incremental_save) {
                 pending_functions.push_back(std::move(feature));
-                if (pending_functions.size() >= batch_size) {
+                if (pending_functions.size() >= export_batch_size) {
                     flush_pending_functions();
                 }
             } else {
@@ -3051,11 +3133,15 @@ bool save_or_open_match_html_diff(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
     const soff::db::ResultMatch& match,
-    bool open_after_save);
+    bool open_after_save,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool save_or_open_match_graph_diff(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match);
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 enum class TextDiffKind
 {
     assembly,
@@ -3065,23 +3151,33 @@ enum class TextDiffKind
 bool show_ida_match_graph_diff(
     const soff::db::DiffResultSet& results,
     const soff::db::ResultMatch& match,
-    soff::ui::GraphDiffKind kind);
+    soff::ui::GraphDiffKind kind,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool show_linear_asm_diff(
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match);
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool show_linear_pseudo_diff(
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match);
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool show_ida_match_text_diff(
     const soff::db::DiffResultSet& results,
     const soff::db::ResultMatch& match,
     TextDiffKind kind,
     soff::Address focus_primary = 0,
-    soff::Address focus_secondary = 0);
+    soff::Address focus_secondary = 0,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool save_or_open_match_call_context(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match);
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 bool show_match_diff_panel(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
@@ -3090,17 +3186,20 @@ SelectedChooserEditResult import_selected_matches_from_chooser(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
     const std::vector<ResultChooserRow>& rows,
-    const sizevec_t& selected_rows);
+    const sizevec_t& selected_rows,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache = nullptr,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache = nullptr);
 
 class diff_results_chooser_t : public chooser_multi_t
 {
 public:
     explicit diff_results_chooser_t(std::filesystem::path result_path, soff::db::DiffResultSet results)
         : chooser_multi_t(CH_CAN_REFRESH | CH_CAN_EDIT | CH_RESTORE, column_count, widths_, header_, "Soff Diff Results"),
-          result_path_(std::move(result_path)),
           results_(std::move(results))
     {
         CASSERT(column_count == 7);
+        set_result_path(std::move(result_path));
+        results_loaded_ = true;
         rebuild_rows();
     }
 
@@ -3158,9 +3257,16 @@ public:
             return NOTHING_CHANGED;
         }
 
-        const auto edit_result = import_selected_matches_from_chooser(result_path_, results_, rows_, *sel);
+        ensure_results_loaded();
+        const auto edit_result = import_selected_matches_from_chooser(
+            result_path_,
+            results_,
+            rows_,
+            *sel,
+            &primary_snapshot_cache_,
+            &secondary_snapshot_cache_);
         if (edit_result == SelectedChooserEditResult::imported) {
-            results_ = soff::db::ResultRepository{}.load(result_path_);
+            primary_snapshot_cache_.clear();
             rebuild_rows();
             return ALL_CHANGED;
         }
@@ -3172,12 +3278,33 @@ public:
 
     cbres_t idaapi refresh(sizevec_t*) override
     {
-        results_ = soff::db::ResultRepository{}.load(result_path_);
+        ensure_results_loaded();
         rebuild_rows();
         return ALL_CHANGED;
     }
 
 private:
+    void set_result_path(std::filesystem::path result_path)
+    {
+        if (result_path_ == result_path) {
+            return;
+        }
+        result_path_ = std::move(result_path);
+        results_loaded_ = false;
+        primary_snapshot_cache_.clear();
+        secondary_snapshot_cache_.clear();
+    }
+
+    void ensure_results_loaded()
+    {
+        if (results_loaded_) {
+            return;
+        }
+        soff::perf::ScopedTimer timer("plugin.results.load");
+        results_ = soff::db::ResultRepository{}.load(result_path_);
+        results_loaded_ = true;
+    }
+
     void rebuild_rows()
     {
         result_path_text_ = result_path_.string();
@@ -3221,6 +3348,9 @@ private:
     std::filesystem::path result_path_;
     std::string result_path_text_;
     soff::db::DiffResultSet results_;
+    bool results_loaded_ = false;
+    PathCache<soff::ProgramSnapshot> primary_snapshot_cache_;
+    PathCache<soff::ProgramSnapshot> secondary_snapshot_cache_;
     std::vector<ResultChooserRow> rows_;
 };
 
@@ -3350,31 +3480,31 @@ private:
     {
         switch (action) {
         case MatchDiffPanelAction::assembly_flat:
-            show_linear_asm_diff(results_, match_);
+            show_linear_asm_diff(results_, match_, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::assembly_blocks:
-            show_ida_match_graph_diff(results_, match_, soff::ui::GraphDiffKind::native);
+            show_ida_match_graph_diff(results_, match_, soff::ui::GraphDiffKind::native, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::pseudocode_flat:
-            show_linear_pseudo_diff(results_, match_);
+            show_linear_pseudo_diff(results_, match_, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::microcode_flat:
-            show_ida_match_text_diff(results_, match_, TextDiffKind::microcode);
+            show_ida_match_text_diff(results_, match_, TextDiffKind::microcode, 0, 0, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::microcode_blocks:
-            show_ida_match_graph_diff(results_, match_, soff::ui::GraphDiffKind::microcode);
+            show_ida_match_graph_diff(results_, match_, soff::ui::GraphDiffKind::microcode, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::call_context:
-            save_or_open_match_call_context(result_path_, results_, match_);
+            save_or_open_match_call_context(result_path_, results_, match_, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::html_open:
-            save_or_open_match_html_diff(result_path_, results_, match_, true);
+            save_or_open_match_html_diff(result_path_, results_, match_, true, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::html_save:
-            save_or_open_match_html_diff(result_path_, results_, match_, false);
+            save_or_open_match_html_diff(result_path_, results_, match_, false, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         case MatchDiffPanelAction::html_graph_preview:
-            save_or_open_match_graph_diff(result_path_, results_, match_);
+            save_or_open_match_graph_diff(result_path_, results_, match_, &primary_snapshot_cache_, &secondary_snapshot_cache_);
             break;
         }
     }
@@ -3386,6 +3516,8 @@ private:
     soff::db::DiffResultSet results_;
     soff::db::ResultMatch match_;
     std::string target_label_;
+    PathCache<soff::ProgramSnapshot> primary_snapshot_cache_;
+    PathCache<soff::ProgramSnapshot> secondary_snapshot_cache_;
     std::vector<MatchDiffPanelRow> rows_;
 };
 
@@ -3534,7 +3666,9 @@ bool save_or_open_match_html_diff(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
     const soff::db::ResultMatch& match,
-    bool open_after_save)
+    bool open_after_save,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -3544,8 +3678,14 @@ bool save_or_open_match_html_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -3644,6 +3784,8 @@ struct GraphDiffContext
     std::vector<GraphDiffNode> nodes;
     std::vector<GraphDiffEdge> edges;
     std::vector<int> peer_node_by_node;
+    PathCache<soff::ProgramSnapshot> primary_snapshot_cache;
+    PathCache<soff::ProgramSnapshot> secondary_snapshot_cache;
 };
 
 std::vector<std::unique_ptr<GraphDiffContext>>& graph_diff_contexts()
@@ -4607,7 +4749,9 @@ void link_graph_diff_peers(GraphDiffContext& primary_context, GraphDiffContext& 
 bool show_ida_match_graph_diff(
     const soff::db::DiffResultSet& results,
     const soff::db::ResultMatch& match,
-    soff::ui::GraphDiffKind kind)
+    soff::ui::GraphDiffKind kind,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -4617,8 +4761,12 @@ bool show_ida_match_graph_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        auto& primary_cache = primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached;
+        auto& secondary_cache = secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(primary_cache, results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(secondary_cache, results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -4662,10 +4810,14 @@ bool show_ida_match_graph_diff(
             primary_context->diff_db = results.diff_db;
             primary_context->match = match;
             primary_context->has_match = true;
+            primary_context->primary_snapshot_cache = primary_cache;
+            primary_context->secondary_snapshot_cache = secondary_cache;
             secondary_context->main_db = results.main_db;
             secondary_context->diff_db = results.diff_db;
             secondary_context->match = match;
             secondary_context->has_match = true;
+            secondary_context->primary_snapshot_cache = primary_cache;
+            secondary_context->secondary_snapshot_cache = secondary_cache;
             link_graph_diff_peers(*primary_context, *secondary_context);
         }
         if (primary_context != nullptr && primary_context->viewer != nullptr) {
@@ -4684,7 +4836,9 @@ bool show_ida_match_graph_diff(
 bool save_or_open_match_graph_diff(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match)
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         const int graph_choice = ask_buttons(
@@ -4707,8 +4861,14 @@ bool save_or_open_match_graph_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -4757,7 +4917,9 @@ bool save_or_open_match_graph_diff(
 bool save_or_open_match_call_context(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match)
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -4767,8 +4929,14 @@ bool save_or_open_match_call_context(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -5061,7 +5229,9 @@ bool show_text_diff_viewer(
 
 bool show_linear_asm_diff(
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match)
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -5071,8 +5241,14 @@ bool show_linear_asm_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -5166,7 +5342,9 @@ bool show_linear_asm_diff(
 
 bool show_linear_pseudo_diff(
     const soff::db::DiffResultSet& results,
-    const soff::db::ResultMatch& match)
+    const soff::db::ResultMatch& match,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -5176,8 +5354,14 @@ bool show_linear_pseudo_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -5293,7 +5477,9 @@ bool show_ida_match_text_diff(
     const soff::db::ResultMatch& match,
     TextDiffKind kind,
     soff::Address focus_primary,
-    soff::Address focus_secondary)
+    soff::Address focus_secondary,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
     try {
         if (const auto error = validate_export_database(results.main_db, "Primary"); !error.empty()) {
@@ -5303,8 +5489,14 @@ bool show_ida_match_text_diff(
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
 
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+        PathCache<soff::ProgramSnapshot> primary_uncached;
+        PathCache<soff::ProgramSnapshot> secondary_uncached;
+        const auto& primary_snapshot = load_snapshot_cached(
+            primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+            results.main_db);
+        const auto& secondary_snapshot = load_snapshot_cached(
+            secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+            results.diff_db);
         const auto* primary = find_function_by_address(primary_snapshot, match.primary);
         const auto* secondary = find_function_by_address(secondary_snapshot, match.secondary);
         if (primary == nullptr || secondary == nullptr) {
@@ -5345,7 +5537,11 @@ void show_result_chooser(const std::filesystem::path& result_path)
     if (const auto error = validate_result_database(result_path); !error.empty()) {
         throw soff::Error(soff::ErrorCode::diff_failed, error);
     }
-    auto results = soff::db::ResultRepository{}.load(result_path);
+    soff::db::DiffResultSet results;
+    {
+        soff::perf::ScopedTimer timer("plugin.results.load");
+        results = soff::db::ResultRepository{}.load(result_path);
+    }
     auto* chooser = new diff_results_chooser_t(result_path, std::move(results));
     chooser->choose();
     save_last_result_path(result_path);
@@ -5762,82 +5958,98 @@ SelectedChooserEditResult import_selected_matches_from_chooser(
     const std::filesystem::path& result_path,
     const soff::db::DiffResultSet& results,
     const std::vector<ResultChooserRow>& rows,
-    const sizevec_t& selected_rows)
+    const sizevec_t& selected_rows,
+    PathCache<soff::ProgramSnapshot>* primary_snapshot_cache,
+    PathCache<soff::ProgramSnapshot>* secondary_snapshot_cache)
 {
-    soff::db::DiffResultSet selected;
-    selected.main_db = results.main_db;
-    selected.diff_db = results.diff_db;
-    selected.version = results.version;
-    selected.date = results.date;
+    try {
+        soff::db::DiffResultSet selected;
+        selected.main_db = results.main_db;
+        selected.diff_db = results.diff_db;
+        selected.version = results.version;
+        selected.date = results.date;
 
-    std::unordered_set<int> seen_matches;
-    for (const auto row_index : selected_rows) {
-        if (row_index >= rows.size()) {
-            continue;
+        std::unordered_set<int> seen_matches;
+        for (const auto row_index : selected_rows) {
+            if (row_index >= rows.size()) {
+                continue;
+            }
+            const auto match_index = rows[row_index].match_index;
+            if (match_index < 0 || static_cast<std::size_t>(match_index) >= results.matches.size()) {
+                continue;
+            }
+            if (!seen_matches.insert(match_index).second) {
+                continue;
+            }
+            selected.matches.push_back(results.matches[static_cast<std::size_t>(match_index)]);
         }
-        const auto match_index = rows[row_index].match_index;
-        if (match_index < 0 || static_cast<std::size_t>(match_index) >= results.matches.size()) {
-            continue;
+
+        if (selected.matches.empty()) {
+            info("Soff selected rows do not contain importable matches");
+            return SelectedChooserEditResult::unchanged;
         }
-        if (!seen_matches.insert(match_index).second) {
-            continue;
+
+        const auto options = import_plan_options_from_env();
+        soff::ui::ImportPlan plan;
+        const auto main_db_error = validate_export_database(selected.main_db, "Primary");
+        const auto diff_db_error = validate_export_database(selected.diff_db, "Secondary");
+        if (main_db_error.empty() && diff_db_error.empty()) {
+            PathCache<soff::ProgramSnapshot> primary_uncached;
+            PathCache<soff::ProgramSnapshot> secondary_uncached;
+            const auto& primary_snapshot = load_snapshot_cached(
+                primary_snapshot_cache != nullptr ? *primary_snapshot_cache : primary_uncached,
+                selected.main_db);
+            const auto& secondary_snapshot = load_snapshot_cached(
+                secondary_snapshot_cache != nullptr ? *secondary_snapshot_cache : secondary_uncached,
+                selected.diff_db);
+            plan = soff::ui::build_import_plan(selected, primary_snapshot, secondary_snapshot, options);
+        } else {
+            msg(
+                "Soff: selected import is falling back to result names only: primary=%s secondary=%s\n",
+                main_db_error.c_str(),
+                diff_db_error.c_str());
+            plan = soff::ui::build_import_plan(selected, options);
         }
-        selected.matches.push_back(results.matches[static_cast<std::size_t>(match_index)]);
-    }
 
-    if (selected.matches.empty()) {
-        info("Soff selected rows do not contain importable matches");
-        return SelectedChooserEditResult::unchanged;
-    }
+        if (plan.items.empty()) {
+            const auto counts = import_plan_counts_text(plan);
+            info(
+                "Soff selected import found no candidates for %zu selected match(es).\n%s",
+                selected.matches.size(),
+                counts.c_str());
+            return SelectedChooserEditResult::unchanged;
+        }
 
-    const auto options = import_plan_options_from_env();
-    soff::ui::ImportPlan plan;
-    const auto main_db_error = validate_export_database(selected.main_db, "Primary");
-    const auto diff_db_error = validate_export_database(selected.diff_db, "Secondary");
-    if (main_db_error.empty() && diff_db_error.empty()) {
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(selected.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(selected.diff_db);
-        plan = soff::ui::build_import_plan(selected, primary_snapshot, secondary_snapshot, options);
-    } else {
-        msg(
-            "Soff: selected import is falling back to result names only: primary=%s secondary=%s\n",
-            main_db_error.c_str(),
-            diff_db_error.c_str());
-        plan = soff::ui::build_import_plan(selected, options);
-    }
-
-    if (plan.items.empty()) {
         const auto counts = import_plan_counts_text(plan);
-        info(
-            "Soff selected import found no candidates for %zu selected match(es).\n%s",
+        const int choice = ask_buttons(
+            "~I~mport metadata",
+            "~J~ump only",
+            "~C~ancel",
+            ASKBTN_YES,
+            "Import metadata for %zu selected match(es)?\n\n%s\n\n"
+            "This modifies the current IDB.",
             selected.matches.size(),
             counts.c_str());
+        if (choice == ASKBTN_NO) {
+            return SelectedChooserEditResult::jump;
+        }
+        if (choice != ASKBTN_YES) {
+            return SelectedChooserEditResult::unchanged;
+        }
+
+        const auto summary = apply_import_plan(plan);
+        const auto applied = import_apply_counts_text(summary, nullptr, plan.items.size());
+        info("Soff selected import complete.\n%s", applied.c_str());
+        refresh_primary_export_after_import(results, true, "selected import");
+        save_last_result_path(result_path);
+        return SelectedChooserEditResult::imported;
+    } catch (const std::exception& error) {
+        warning("Soff selected import failed:\n%s", error.what());
+        return SelectedChooserEditResult::unchanged;
+    } catch (...) {
+        warning("Soff selected import failed with an unknown error");
         return SelectedChooserEditResult::unchanged;
     }
-
-    const auto counts = import_plan_counts_text(plan);
-    const int choice = ask_buttons(
-        "~I~mport metadata",
-        "~J~ump only",
-        "~C~ancel",
-        ASKBTN_YES,
-        "Import metadata for %zu selected match(es)?\n\n%s\n\n"
-        "This modifies the current IDB.",
-        selected.matches.size(),
-        counts.c_str());
-    if (choice == ASKBTN_NO) {
-        return SelectedChooserEditResult::jump;
-    }
-    if (choice != ASKBTN_YES) {
-        return SelectedChooserEditResult::unchanged;
-    }
-
-    const auto summary = apply_import_plan(plan);
-    const auto applied = import_apply_counts_text(summary, nullptr, plan.items.size());
-    info("Soff selected import complete.\n%s", applied.c_str());
-    refresh_primary_export_after_import(results, true, "selected import");
-    save_last_result_path(result_path);
-    return SelectedChooserEditResult::imported;
 }
 
 int run_import_results_ui()
@@ -5859,7 +6071,11 @@ int run_import_results_ui()
         if (const auto error = validate_result_database(result_path); !error.empty()) {
             throw soff::Error(soff::ErrorCode::diff_failed, error);
         }
-        const auto results = soff::db::ResultRepository{}.load(result_path);
+        soff::db::DiffResultSet results;
+        {
+            soff::perf::ScopedTimer timer("plugin.results.load");
+            results = soff::db::ResultRepository{}.load(result_path);
+        }
         const auto options = import_plan_options_from_env();
         bool import_tils = true;
         bool import_definitions = true;
@@ -5871,8 +6087,10 @@ int run_import_results_ui()
         const auto main_db_error = validate_export_database(results.main_db, "Primary");
         const auto diff_db_error = validate_export_database(results.diff_db, "Secondary");
         if (main_db_error.empty() && diff_db_error.empty()) {
-            const auto primary_snapshot = soff::SnapshotRepository{}.load(results.main_db);
-            const auto secondary_snapshot = soff::SnapshotRepository{}.load(results.diff_db);
+            PathCache<soff::ProgramSnapshot> primary_snapshot_cache;
+            PathCache<soff::ProgramSnapshot> secondary_snapshot_cache;
+            const auto& primary_snapshot = load_snapshot_cached(primary_snapshot_cache, results.main_db);
+            const auto& secondary_snapshot = load_snapshot_cached(secondary_snapshot_cache, results.diff_db);
             definition_summary = apply_type_definitions(secondary_snapshot, import_tils, import_definitions);
             plan = soff::ui::build_import_plan(results, primary_snapshot, secondary_snapshot, options);
         } else {
@@ -5964,6 +6182,7 @@ int run_export_ui()
         const auto result = export_current_idb(output_path, options);
         const auto summary = export_summary_text(result, output_path);
         info("Soff export complete.\n%s", summary.c_str());
+        print_perf_report_if_enabled();
     } catch (const std::exception& error) {
         warning("Soff export failed:\n%s", error.what());
     } catch (...) {
@@ -6007,6 +6226,7 @@ int run_diff_ui()
             summary.results.unmatched_primary,
             summary.results.unmatched_secondary);
         show_result_chooser(options.result_db);
+        print_perf_report_if_enabled();
     } catch (const std::exception& error) {
         warning("Soff diff failed:\n%s", error.what());
     } catch (...) {
@@ -6289,62 +6509,72 @@ bool show_active_graph_text_diff()
             ? TextDiffKind::assembly
             : (text_choice == ASKBTN_NO ? TextDiffKind::pseudocode : TextDiffKind::microcode),
         node != nullptr ? node->primary : 0,
-        node != nullptr ? node->secondary : 0);
+        node != nullptr ? node->secondary : 0,
+        &context->primary_snapshot_cache,
+        &context->secondary_snapshot_cache);
 }
 
 bool import_active_graph_match()
 {
-    auto* context = active_graph_diff_context();
-    if (context == nullptr || !context->has_match) {
-        warning("Soff graph diff has no match context to import");
-        return false;
-    }
-    const auto* active_node = active_graph_diff_node_info();
-    if (active_node == nullptr) {
-        warning("Soff graph diff has no active block node to import");
-        return false;
-    }
+    try {
+        auto* context = active_graph_diff_context();
+        if (context == nullptr || !context->has_match) {
+            warning("Soff graph diff has no match context to import");
+            return false;
+        }
+        const auto* active_node = active_graph_diff_node_info();
+        if (active_node == nullptr) {
+            warning("Soff graph diff has no active block node to import");
+            return false;
+        }
 
-    soff::db::DiffResultSet selected;
-    selected.main_db = context->main_db;
-    selected.diff_db = context->diff_db;
-    selected.matches.push_back(context->match);
+        soff::db::DiffResultSet selected;
+        selected.main_db = context->main_db;
+        selected.diff_db = context->diff_db;
+        selected.matches.push_back(context->match);
 
-    soff::ui::ImportPlan plan;
-    const auto options = import_plan_options_from_env();
-    const auto main_db_error = validate_export_database(selected.main_db, "Primary");
-    const auto diff_db_error = validate_export_database(selected.diff_db, "Secondary");
-    if (main_db_error.empty() && diff_db_error.empty()) {
-        const auto primary_snapshot = soff::SnapshotRepository{}.load(selected.main_db);
-        const auto secondary_snapshot = soff::SnapshotRepository{}.load(selected.diff_db);
-        plan = soff::ui::build_import_plan(selected, primary_snapshot, secondary_snapshot, options);
-    } else {
-        plan = soff::ui::build_import_plan(selected, options);
-    }
-    keep_active_graph_block_items(plan, *active_node);
-    if (plan.items.empty()) {
-        info(
-            "Soff graph block import found no instruction/comment candidates for primary block %s.",
+        soff::ui::ImportPlan plan;
+        const auto options = import_plan_options_from_env();
+        const auto main_db_error = validate_export_database(selected.main_db, "Primary");
+        const auto diff_db_error = validate_export_database(selected.diff_db, "Secondary");
+        if (main_db_error.empty() && diff_db_error.empty()) {
+            const auto& primary_snapshot = load_snapshot_cached(context->primary_snapshot_cache, selected.main_db);
+            const auto& secondary_snapshot = load_snapshot_cached(context->secondary_snapshot_cache, selected.diff_db);
+            plan = soff::ui::build_import_plan(selected, primary_snapshot, secondary_snapshot, options);
+        } else {
+            plan = soff::ui::build_import_plan(selected, options);
+        }
+        keep_active_graph_block_items(plan, *active_node);
+        if (plan.items.empty()) {
+            info(
+                "Soff graph block import found no instruction/comment candidates for primary block %s.",
+                address_hex(active_node->primary).c_str());
+            return false;
+        }
+
+        const int choice = ask_buttons(
+            "~I~mport block metadata",
+            "~C~ancel",
+            nullptr,
+            ASKBTN_YES,
+            "Import %zu instruction/comment item(s) for primary block %s?\n\n"
+            "This modifies the current IDB.",
+            plan.items.size(),
             address_hex(active_node->primary).c_str());
+        if (choice != ASKBTN_YES) {
+            return false;
+        }
+        const auto summary = apply_import_plan(plan);
+        const auto applied = import_apply_counts_text(summary, nullptr, plan.items.size());
+        info("Soff graph import complete.\n%s", applied.c_str());
+        return true;
+    } catch (const std::exception& error) {
+        warning("Soff graph import failed:\n%s", error.what());
+        return false;
+    } catch (...) {
+        warning("Soff graph import failed with an unknown error");
         return false;
     }
-
-    const int choice = ask_buttons(
-        "~I~mport block metadata",
-        "~C~ancel",
-        nullptr,
-        ASKBTN_YES,
-        "Import %zu instruction/comment item(s) for primary block %s?\n\n"
-        "This modifies the current IDB.",
-        plan.items.size(),
-        address_hex(active_node->primary).c_str());
-    if (choice != ASKBTN_YES) {
-        return false;
-    }
-    const auto summary = apply_import_plan(plan);
-    const auto applied = import_apply_counts_text(summary, nullptr, plan.items.size());
-    info("Soff graph import complete.\n%s", applied.c_str());
-    return true;
 }
 
 struct graph_sync_peer_handler_t : public action_handler_t
@@ -6884,6 +7114,7 @@ private:
 
 plugmod_t* idaapi init()
 {
+    soff::perf::ScopedTimer timer("plugin.init");
     msg("%s %s: plugin loaded\n",
         soff::product_name().data(),
         soff::version().data());

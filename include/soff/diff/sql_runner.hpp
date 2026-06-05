@@ -2,6 +2,7 @@
 
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
+#include "soff/diff/function_cache.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -31,6 +32,8 @@ struct SqlRunnerOptions
     int progress_check_interval = 1000;
     std::function<bool()> cancel_requested;
     DiffHooks* hooks = nullptr;
+    const FunctionCache* primary_cache = nullptr;
+    const FunctionCache* secondary_cache = nullptr;
     boost::unordered_flat_set<Address> pre_matched_primary;
     boost::unordered_flat_set<Address> pre_matched_secondary;
 };

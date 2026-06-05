@@ -63,6 +63,128 @@ std::string create_index_sql(std::size_t index, const db::IndexDefinition& defin
     return sql.str();
 }
 
+std::string sql_string_literal(std::string_view value)
+{
+    std::string quoted;
+    quoted.reserve(value.size() + 2);
+    quoted.push_back('\'');
+    for (const char ch : value) {
+        if (ch == '\'') {
+            quoted.push_back('\'');
+        }
+        quoted.push_back(ch);
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
+
+bool functions_has_unique_rva_constraint(db::Database& database)
+{
+    for (const auto& index_row : database.query_rows("pragma index_list(functions)")) {
+        if (index_row.size() < 3 || index_row[2] != "1") {
+            continue;
+        }
+
+        const auto& index_name = index_row[1];
+        const auto columns = database.query_rows("pragma index_info(" + sql_string_literal(index_name) + ")");
+        if (columns.size() != 1 || columns.front().size() < 3) {
+            continue;
+        }
+        if (columns.front()[2] == "rva") {
+            return true;
+        }
+    }
+    return false;
+}
+
+void migrate_functions_table_without_unique_rva(db::Database& database)
+{
+    if (!functions_has_unique_rva_constraint(database)) {
+        return;
+    }
+
+    static constexpr const char* function_columns =
+        "id, name, address, nodes, edges, indegree, outdegree, size, instructions, "
+        "mnemonics, names, prototype, cyclomatic_complexity, primes_value, comment, "
+        "mangled_function, bytes_hash, pseudocode, pseudocode_lines, pseudocode_hash1, "
+        "pseudocode_primes, function_flags, assembly, prototype2, pseudocode_hash2, "
+        "pseudocode_hash3, strongly_connected, loops, rva, tarjan_topological_sort, "
+        "strongly_connected_spp, clean_assembly, clean_pseudo, mnemonics_spp, switches, "
+        "function_hash, bytes_sum, md_index, constants, constants_count, segment_rva, "
+        "assembly_addrs, kgh_hash, source_file, userdata, microcode, clean_microcode, "
+        "microcode_spp, export_time";
+
+    database.execute("begin immediate");
+    try {
+        database.execute("alter table functions rename to functions_unique_rva_old");
+        database.execute(db::diaphora_compatible_schema().tables.front());
+        database.execute(
+            std::string("insert into functions (") + function_columns + ") select "
+            + function_columns + " from functions_unique_rva_old");
+        database.execute("drop table functions_unique_rva_old");
+        database.execute("commit");
+    } catch (...) {
+        database.execute("rollback");
+        throw;
+    }
+}
+
+struct SnapshotInsertStatements
+{
+    explicit SnapshotInsertStatements(db::Database& database)
+        : function(database.prepare(
+              "insert into functions (name, address, rva, segment_rva, nodes, edges, size, instructions, "
+              "indegree, outdegree, cyclomatic_complexity, primes_value, strongly_connected, loops, "
+              "tarjan_topological_sort, strongly_connected_spp, mnemonics_spp, switches, mnemonics, names, "
+              "prototype, mangled_function, bytes_hash, assembly, prototype2, function_flags, "
+              "clean_assembly, function_hash, bytes_sum, md_index, constants_count, constants, "
+              "assembly_addrs, kgh_hash, source_file, userdata, export_time, comment, pseudocode, clean_pseudo, pseudocode_lines, pseudocode_hash1, "
+              "pseudocode_hash2, pseudocode_hash3, pseudocode_primes, microcode, clean_microcode, microcode_spp) "
+              "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+              "nullif(?, ''), nullif(?, ''), ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), "
+              "nullif(?, ''), nullif(?, ''), ?)"))
+        , instruction(database.prepare(
+              "insert into instructions (func_id, address, disasm, mnemonic, comment1, comment2, "
+              "operand_names, name, type, pseudocomment, pseudoitp, asm_type) "
+              "values (?, ?, ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), "
+              "nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)"))
+        , basic_block(database.prepare(
+              "insert into basic_blocks (num, address, asm_type) values (?, ?, ?)"))
+        , function_bblock(database.prepare(
+              "insert into function_bblocks (function_id, basic_block_id, asm_type) values (?, ?, ?)"))
+        , bb_instruction(database.prepare(
+              "insert into bb_instructions (basic_block_id, instruction_id) values (?, ?)"))
+        , bb_relation(database.prepare(
+              "insert into bb_relations (parent_id, child_id) values (?, ?)"))
+        , callgraph(database.prepare(
+              "insert into callgraph (func_id, address, type) values (?, ?, ?)"))
+        , constant(database.prepare(
+              "insert into constants (func_id, constant) values (?, ?)"))
+    {
+    }
+
+    db::Statement function;
+    db::Statement instruction;
+    db::Statement basic_block;
+    db::Statement function_bblock;
+    db::Statement bb_instruction;
+    db::Statement bb_relation;
+    db::Statement callgraph;
+    db::Statement constant;
+};
+
+void bind_and_step(db::Statement& statement, const std::vector<std::string>& values)
+{
+    for (int i = 0; i < static_cast<int>(values.size()); ++i) {
+        statement.bind(i + 1, values[static_cast<std::size_t>(i)]);
+    }
+    const bool returned_row = statement.step();
+    statement.reset();
+    if (returned_row) {
+        throw std::runtime_error("SQLite insert unexpectedly returned a row");
+    }
+}
+
 std::vector<InstructionFeature> load_instruction_rows(
     db::Database& database,
     const std::string& function_id,
@@ -232,6 +354,8 @@ void SnapshotRepository::create_schema(const std::filesystem::path& path) const
         database.execute(table);
     }
 
+    migrate_functions_table_without_unique_rva(database);
+
     if (database.query_int("select count(*) from version") == 0) {
         database.execute("insert into version values (?)", {std::string(export_version())});
     }
@@ -257,136 +381,117 @@ void SnapshotRepository::attach_diff(
     database.attach(diff_path, schema_name);
 }
 
-void insert_function_rows(db::Database& database, const FunctionFeature& function)
+void insert_function_rows(
+    db::Database& database,
+    SnapshotInsertStatements& statements,
+    const FunctionFeature& function)
 {
-    database.execute(
-        "insert into functions (name, address, rva, segment_rva, nodes, edges, size, instructions, "
-        "indegree, outdegree, cyclomatic_complexity, primes_value, strongly_connected, loops, "
-        "tarjan_topological_sort, strongly_connected_spp, mnemonics_spp, switches, mnemonics, names, "
-        "prototype, mangled_function, bytes_hash, assembly, prototype2, function_flags, "
-        "clean_assembly, function_hash, bytes_sum, md_index, constants_count, constants, "
-        "assembly_addrs, kgh_hash, source_file, userdata, export_time, comment, pseudocode, clean_pseudo, pseudocode_lines, pseudocode_hash1, "
-        "pseudocode_hash2, pseudocode_hash3, pseudocode_primes, microcode, clean_microcode, microcode_spp) "
-        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "nullif(?, ''), nullif(?, ''), ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), "
-        "nullif(?, ''), nullif(?, ''), ?)",
-        {
-            function.name,
-            address_to_text(function.address),
-            address_to_text(function.rva),
-            address_to_text(function.segment_rva),
-            std::to_string(function.node_count != 0 ? function.node_count : function.blocks.size()),
-            std::to_string(function.edge_count),
-            std::to_string(function.size),
-            std::to_string(function.instruction_count),
-            std::to_string(function.indegree),
-            std::to_string(function.outdegree),
-            std::to_string(function.cyclomatic_complexity),
-            function.primes_value,
-            std::to_string(function.strongly_connected),
-            std::to_string(function.loops),
-            function.tarjan_topological_sort,
-            function.strongly_connected_spp,
-            function.mnemonics_spp,
-            function.switches,
-            function.mnemonics,
-            function.names,
-            function.prototype,
-            function.mangled_function,
-            function.bytes_hash,
-            function.assembly,
-            function.prototype2,
-            std::to_string(function.function_flags),
-            function.stripped_assembly,
-            function.function_hash,
-            std::to_string(function.bytes_sum),
-            function.md_index,
-            std::to_string(function.constants.size()),
-            json_string_array(function.constants),
-            function.assembly_addrs,
-            function.kgh_hash,
-            function.source_file,
-            function.userdata,
-            std::to_string(function.export_time),
-            function.comment,
-            function.pseudocode,
-            function.stripped_pseudocode,
-            std::to_string(function.pseudocode_lines),
-            function.pseudocode_hash1,
-            function.pseudocode_hash2,
-            function.pseudocode_hash3,
-            function.pseudocode_primes,
-            function.microcode,
-            function.stripped_microcode,
-            function.microcode_spp,
-        });
+    bind_and_step(statements.function, {
+        function.name,
+        address_to_text(function.address),
+        address_to_text(function.rva),
+        address_to_text(function.segment_rva),
+        std::to_string(function.node_count != 0 ? function.node_count : function.blocks.size()),
+        std::to_string(function.edge_count),
+        std::to_string(function.size),
+        std::to_string(function.instruction_count),
+        std::to_string(function.indegree),
+        std::to_string(function.outdegree),
+        std::to_string(function.cyclomatic_complexity),
+        function.primes_value,
+        std::to_string(function.strongly_connected),
+        std::to_string(function.loops),
+        function.tarjan_topological_sort,
+        function.strongly_connected_spp,
+        function.mnemonics_spp,
+        function.switches,
+        function.mnemonics,
+        function.names,
+        function.prototype,
+        function.mangled_function,
+        function.bytes_hash,
+        function.assembly,
+        function.prototype2,
+        std::to_string(function.function_flags),
+        function.stripped_assembly,
+        function.function_hash,
+        std::to_string(function.bytes_sum),
+        function.md_index,
+        std::to_string(function.constants.size()),
+        json_string_array(function.constants),
+        function.assembly_addrs,
+        function.kgh_hash,
+        function.source_file,
+        function.userdata,
+        std::to_string(function.export_time),
+        function.comment,
+        function.pseudocode,
+        function.stripped_pseudocode,
+        std::to_string(function.pseudocode_lines),
+        function.pseudocode_hash1,
+        function.pseudocode_hash2,
+        function.pseudocode_hash3,
+        function.pseudocode_primes,
+        function.microcode,
+        function.stripped_microcode,
+        function.microcode_spp,
+    });
     const auto function_id = database.query_int("select last_insert_rowid()");
 
-    const auto save_instruction_rows = [&database, function_id](
+    const auto save_instruction_rows = [&database, &statements, function_id](
                                            const std::vector<InstructionFeature>& instructions,
                                            std::string_view asm_type) {
         std::vector<std::int64_t> ids;
         ids.reserve(instructions.size());
         for (const auto& instruction : instructions) {
-            database.execute(
-                "insert into instructions (func_id, address, disasm, mnemonic, comment1, comment2, "
-                "operand_names, name, type, pseudocomment, pseudoitp, asm_type) "
-                "values (?, ?, ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), "
-                "nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)",
-                {
-                    std::to_string(function_id),
-                    address_to_text(instruction.address),
-                    instruction.disassembly,
-                    instruction.mnemonic,
-                    instruction.comment1,
-                    instruction.comment2,
-                    instruction.operand_names,
-                    instruction.name,
-                    instruction.type,
-                    instruction.pseudocomment,
-                    instruction.pseudocomment.empty() ? "" : std::to_string(instruction.pseudoitp),
-                    std::string(asm_type),
-                });
+            bind_and_step(statements.instruction, {
+                std::to_string(function_id),
+                address_to_text(instruction.address),
+                instruction.disassembly,
+                instruction.mnemonic,
+                instruction.comment1,
+                instruction.comment2,
+                instruction.operand_names,
+                instruction.name,
+                instruction.type,
+                instruction.pseudocomment,
+                instruction.pseudocomment.empty() ? "" : std::to_string(instruction.pseudoitp),
+                std::string(asm_type),
+            });
             ids.push_back(database.query_int("select last_insert_rowid()"));
         }
         return ids;
     };
 
-    const auto save_block_rows = [&database, function_id](
+    const auto save_block_rows = [&database, &statements, function_id](
                                      const std::vector<BasicBlock>& blocks,
                                      const std::vector<std::int64_t>& instruction_ids,
                                      std::string_view asm_type) {
         std::map<Address, std::int64_t> block_ids;
         for (std::size_t block_index = 0; block_index < blocks.size(); ++block_index) {
             const auto& block = blocks[block_index];
-            database.execute(
-                "insert into basic_blocks (num, address, asm_type) values (?, ?, ?)",
-                {
-                    std::to_string(block_index),
-                    address_to_text(block.start),
-                    std::string(asm_type),
-                });
+            bind_and_step(statements.basic_block, {
+                std::to_string(block_index),
+                address_to_text(block.start),
+                std::string(asm_type),
+            });
             const auto block_id = database.query_int("select last_insert_rowid()");
             block_ids[block.start] = block_id;
-            database.execute(
-                "insert into function_bblocks (function_id, basic_block_id, asm_type) values (?, ?, ?)",
-                {
-                    std::to_string(function_id),
-                    std::to_string(block_id),
-                    std::string(asm_type),
-                });
+            bind_and_step(statements.function_bblock, {
+                std::to_string(function_id),
+                std::to_string(block_id),
+                std::string(asm_type),
+            });
 
             for (const auto instruction_address : block.instructions) {
                 const auto index = static_cast<std::size_t>(instruction_address);
                 if (index >= instruction_ids.size()) {
                     continue;
                 }
-                database.execute(
-                    "insert into bb_instructions (basic_block_id, instruction_id) values (?, ?)",
-                    {
-                        std::to_string(block_id),
-                        std::to_string(instruction_ids[index]),
-                    });
+                bind_and_step(statements.bb_instruction, {
+                    std::to_string(block_id),
+                    std::to_string(instruction_ids[index]),
+                });
             }
         }
 
@@ -400,12 +505,10 @@ void insert_function_rows(db::Database& database, const FunctionFeature& functio
                 if (child == block_ids.end()) {
                     continue;
                 }
-                database.execute(
-                    "insert into bb_relations (parent_id, child_id) values (?, ?)",
-                    {
-                        std::to_string(parent->second),
-                        std::to_string(child->second),
-                    });
+                bind_and_step(statements.bb_relation, {
+                    std::to_string(parent->second),
+                    std::to_string(child->second),
+                });
             }
         }
     };
@@ -430,22 +533,18 @@ void insert_function_rows(db::Database& database, const FunctionFeature& functio
     save_block_rows(function.microcode_blocks, microcode_instruction_ids, "microcode");
 
     for (const auto& call : function.call_references) {
-        database.execute(
-            "insert into callgraph (func_id, address, type) values (?, ?, ?)",
-            {
-                std::to_string(function_id),
-                address_to_text(call.address),
-                call.type,
-            });
+        bind_and_step(statements.callgraph, {
+            std::to_string(function_id),
+            address_to_text(call.address),
+            call.type,
+        });
     }
 
     for (const auto& constant : function.constants) {
-        database.execute(
-            "insert into constants (func_id, constant) values (?, ?)",
-            {
-                std::to_string(function_id),
-                constant,
-            });
+        bind_and_step(statements.constant, {
+            std::to_string(function_id),
+            constant,
+        });
     }
 }
 
@@ -464,13 +563,21 @@ void SnapshotRepository::begin_incremental_save(
     bool replace) const
 {
     if (replace && std::filesystem::exists(path)) {
-        std::filesystem::remove(path);
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(path.string() + "-wal", ec);
+        std::filesystem::remove(path.string() + "-shm", ec);
+        if (std::filesystem::exists(path)) {
+            throw std::runtime_error(
+                "Failed to remove existing snapshot file (may be in use): " + path.string());
+        }
     }
 
     create_schema(path);
 
     db::Database database;
     database.open(path);
+    database.apply_performance_pragmas();
     database.execute("begin immediate");
     try {
         if (database.query_int("select count(*) from program") == 0) {
@@ -495,10 +602,12 @@ void SnapshotRepository::append_functions(
 
     db::Database database;
     database.open(path);
+    database.apply_performance_pragmas();
     database.execute("begin immediate");
     try {
+        SnapshotInsertStatements statements(database);
         for (const auto& function : functions) {
-            insert_function_rows(database, function);
+            insert_function_rows(database, statements, function);
         }
         database.execute("commit");
     } catch (...) {

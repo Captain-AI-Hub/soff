@@ -1,5 +1,7 @@
 #include "soff/db/database.hpp"
 
+#include "soff/core/perf.hpp"
+
 #include <cstdlib>
 #include <functional>
 #include <stdexcept>
@@ -390,6 +392,7 @@ bool Database::is_open() const noexcept
 
 void Database::execute(std::string_view sql)
 {
+    soff::perf::add_counter("sql.execute");
     char* error = nullptr;
     const std::string sql_text(sql);
     const int rc = impl_->api->exec(impl_->db, sql_text.c_str(), nullptr, nullptr, &error);
@@ -404,6 +407,7 @@ void Database::execute(std::string_view sql)
 
 void Database::execute(std::string_view sql, const std::vector<std::string>& values)
 {
+    soff::perf::add_counter("sql.execute.bound");
     auto statement = prepare(sql);
     for (int i = 0; i < static_cast<int>(values.size()); ++i) {
         statement.bind(i + 1, values[static_cast<std::size_t>(i)]);
@@ -413,6 +417,7 @@ void Database::execute(std::string_view sql, const std::vector<std::string>& val
 
 Statement Database::prepare(std::string_view sql)
 {
+    soff::perf::add_counter("sql.prepare");
     if (!is_open()) {
         throw std::runtime_error("cannot prepare SQLite statement on a closed database");
     }
@@ -445,6 +450,7 @@ std::int64_t Database::query_int(std::string_view sql)
 
 std::vector<QueryRow> Database::query_rows(std::string_view sql)
 {
+    soff::perf::add_counter("sql.query_rows");
     auto statement = prepare(sql);
     std::vector<QueryRow> rows;
     const int columns = statement.column_count();

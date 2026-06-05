@@ -1,4 +1,6 @@
 #include "soff/diff/propagation.hpp"
+
+#include "soff/core/perf.hpp"
 #include "soff/diff/ratio.hpp"
 
 #include <algorithm>
@@ -23,8 +25,11 @@ std::string sql_escape(const std::string& value)
     std::string result;
     result.reserve(value.size() + 4);
     for (char c : value) {
-        if (c == '\'') result += "''";
-        else result += c;
+        if (c == '\'') {
+            result += "''";
+        } else {
+            result += c;
+        }
     }
     return result;
 }
@@ -35,7 +40,9 @@ Address parse_addr(const std::string& text)
     const auto* begin = text.data();
     const auto* end = text.data() + text.size();
     const auto result = std::from_chars(begin, end, addr, 10);
-    if (result.ec == std::errc{} && result.ptr == end) return addr;
+    if (result.ec == std::errc{} && result.ptr == end) {
+        return addr;
+    }
     std::size_t consumed = 0;
     addr = static_cast<Address>(std::stoull(text, &consumed, 0));
     return addr;
@@ -43,8 +50,14 @@ Address parse_addr(const std::string& text)
 
 int parse_int_safe(const std::string& text)
 {
-    if (text.empty()) return 0;
-    try { return std::stoi(text); } catch (...) { return 0; }
+    if (text.empty()) {
+        return 0;
+    }
+    try {
+        return std::stoi(text);
+    } catch (...) {
+        return 0;
+    }
 }
 
 bool already_matched(Address addr,
@@ -75,7 +88,9 @@ std::vector<FuncRow> query_functions_in_range(
         + " and address <= " + std::to_string(high)
         + " order by address";
     for (const auto& row : database.query_rows(sql)) {
-        if (row.size() < 3) continue;
+        if (row.size() < 3) {
+            continue;
+        }
         FuncRow fr;
         fr.address = parse_addr(row[0]);
         fr.name = row[1];
@@ -93,10 +108,47 @@ std::size_t find_same_name(
     boost::unordered_flat_set<Address>& matched_primary,
     boost::unordered_flat_set<Address>& matched_secondary,
     double min_ratio,
-    bool same_processor)
+    bool same_processor,
+    const FunctionCache* primary_cache,
+    const FunctionCache* secondary_cache)
 {
     constexpr double bonus_ratio = 0.01;
     std::size_t added = 0;
+
+    if (primary_cache != nullptr && secondary_cache != nullptr) {
+        soff::perf::add_counter("propagation.same_name.cache_path");
+        for (const auto& [name, primary_address] : primary_cache->by_name) {
+            if (name.size() <= 3) continue;
+            if (name == "unknown" || starts_with(name, "sub_") || starts_with(name, "nullsub_") || starts_with(name, "j_")) continue;
+            if (1.0 < min_ratio) continue;
+            const auto secondary = secondary_cache->by_name.find(name);
+            if (secondary == secondary_cache->by_name.end()) continue;
+            if (matched_primary.count(primary_address) || matched_secondary.count(secondary->second)) continue;
+            const auto primary_func = primary_cache->by_address.find(primary_address);
+            const auto secondary_func = secondary_cache->by_address.find(secondary->second);
+            db::ResultMatch match;
+            match.kind = db::ResultKind::best;
+            match.line = static_cast<int>(matches.size());
+            match.primary = primary_address;
+            match.primary_name = name;
+            match.secondary = secondary->second;
+            match.secondary_name = name;
+            match.ratio = 1.0;
+            if (primary_func != primary_cache->by_address.end()) {
+                match.primary_nodes = primary_func->second.nodes;
+            }
+            if (secondary_func != secondary_cache->by_address.end()) {
+                match.secondary_nodes = secondary_func->second.nodes;
+            }
+            match.description = "Same name propagation";
+            matches.push_back(std::move(match));
+            matched_primary.insert(primary_address);
+            matched_secondary.insert(secondary->second);
+            ++added;
+        }
+        return added;
+    }
+
     const auto sql =
         "select f.address, f.name, df.address, df.name, f.nodes, df.nodes, "
         "f.clean_assembly, df.clean_assembly, f.clean_pseudo, df.clean_pseudo "
@@ -173,6 +225,7 @@ std::size_t find_call_reference_matches(
     for (const auto& m : current_matches) {
         if (m.ratio < 0.5) continue;
 
+        // TODO: N+1 hot path; batch callgraph loads or add callgraph data to FunctionCache.
         // Get callees of primary function
         const auto callees_p = database.query_rows(
             "select c.address, f.address, f.name, f.nodes from callgraph c "
@@ -312,6 +365,7 @@ std::size_t find_matches_diffing(
         if (m.kind != db::ResultKind::best && m.kind != db::ResultKind::partial) continue;
         if (m.ratio < 0.5) continue;
 
+        // TODO: N+1 hot path; this pass should prefetch function text/name rows for current matches.
         const auto field = same_processor ? "assembly" : "pseudocode";
         const auto sql_p = "select " + std::string(field) + ", names from functions where address = '"
             + std::to_string(m.primary) + "' limit 1";
@@ -354,6 +408,7 @@ std::size_t find_matches_diffing(
             for (const auto& sn : secondary_names) {
                 if (pn != sn) continue;
 
+                // TODO: N+1 hot path; replace name/text lookups with FunctionCache when this pass accepts caches.
                 const auto lookup_p = database.query_rows(
                     "select address, name, nodes from functions where name = '"
                     + sql_escape(pn) + "' limit 1");
@@ -462,6 +517,7 @@ std::size_t find_matches_diffing(
         // Try to match renamed pairs
         for (const auto& pn : only_p) {
             for (const auto& sn : only_s) {
+                // TODO: N+1 hot path; replace name/text lookups with FunctionCache when this pass accepts caches.
                 const auto lookup_p2 = database.query_rows(
                     "select address, name, nodes from functions where name = '" + sql_escape(pn) + "' limit 1");
                 const auto lookup_s2 = database.query_rows(
@@ -531,6 +587,7 @@ std::size_t find_related_constants(
         if (m.kind != db::ResultKind::best && m.kind != db::ResultKind::partial) continue;
         if (m.ratio < min_ratio) continue;
 
+        // TODO: N+1 hot path; batch constants and referenced functions for all seed matches.
         const auto sql_p = "select constant from constants where func_id = '"
             + std::to_string(m.primary) + "'";
         const auto sql_s = "select constant from constants where func_id = '"
@@ -633,12 +690,14 @@ PropagationStats run_propagation(
     boost::unordered_flat_set<Address>& matched_secondary,
     const PropagationOptions& options)
 {
+    soff::perf::ScopedTimer timer("diff.propagation");
     PropagationStats stats;
     if (!options.enabled) return stats;
 
     stats.same_name_matches = find_same_name(
         database, matches, matched_primary, matched_secondary,
-        options.same_name_min_ratio, options.same_processor);
+        options.same_name_min_ratio, options.same_processor,
+        options.primary_cache, options.secondary_cache);
 
     for (int iter = 0; iter < options.max_iterations; ++iter) {
         std::size_t round_added = 0;
@@ -694,11 +753,15 @@ std::size_t find_compilation_unit_matches(
         "select cu.name from compilation_units cu "
         "inner join diff.compilation_units dcu on cu.name = dcu.name "
         "where cu.name != ''");
-    if (cu_rows.empty()) return 0;
+    if (cu_rows.empty()) {
+        return 0;
+    }
 
     std::size_t added = 0;
     for (const auto& cu_row : cu_rows) {
-        if (cu_row.empty()) continue;
+        if (cu_row.empty()) {
+            continue;
+        }
         const auto& cu_name = cu_row[0];
 
         // Get unmatched functions in this CU from both sides
@@ -716,23 +779,39 @@ std::size_t find_compilation_unit_matches(
             "where cu.name = '" + sql_escape(cu_name) + "'");
 
         for (const auto& pf : primary_funcs) {
-            if (pf.size() < 5) continue;
+            if (pf.size() < 5) {
+                continue;
+            }
             const auto addr_p = parse_addr(pf[0]);
-            if (matched_primary.contains(addr_p)) continue;
+            if (matched_primary.contains(addr_p)) {
+                continue;
+            }
             const auto& name_p = pf[1];
-            if (name_p.empty()) continue;
+            if (name_p.empty()) {
+                continue;
+            }
 
             for (const auto& sf : secondary_funcs) {
-                if (sf.size() < 5) continue;
+                if (sf.size() < 5) {
+                    continue;
+                }
                 const auto addr_s = parse_addr(sf[0]);
-                if (matched_secondary.contains(addr_s)) continue;
-                if (sf[1] != name_p) continue;
+                if (matched_secondary.contains(addr_s)) {
+                    continue;
+                }
+                if (sf[1] != name_p) {
+                    continue;
+                }
 
                 // Same name in same CU - compute ratio
                 double ratio = candidate_text_ratio(
                     "", "", "", "", pf[3], sf[3], pf[4], sf[4]);
-                if (ratio < min_ratio) continue;
-                if (ratio + 0.01 < 1.0) ratio += 0.01;
+                if (ratio < min_ratio) {
+                    continue;
+                }
+                if (ratio + 0.01 < 1.0) {
+                    ratio += 0.01;
+                }
 
                 db::ResultMatch match;
                 match.kind = db::ResultKind::partial;
