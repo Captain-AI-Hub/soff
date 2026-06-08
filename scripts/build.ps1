@@ -4,7 +4,8 @@ param(
     [switch]$IdaPlugin,
     [string]$IdaSdk = "ida-sdk-93-main/src",
     [switch]$SkipSoff,
-    [switch]$SkipDesktop
+    [switch]$SkipDesktop,
+    [string]$DesktopBundles = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +84,12 @@ if (-not $SkipDesktop) {
     if (-not (Test-Path (Join-Path $DesktopDir "node_modules"))) {
         Invoke-Checked "bun" @("install") $DesktopDir
     }
-    Invoke-Checked "bun" @("run", "tauri", "build") $DesktopDir
+    if ($DesktopBundles) {
+        Invoke-Checked "bun" @("run", "tauri", "build", "--", "--bundles", $DesktopBundles) $DesktopDir
+    }
+    else {
+        Invoke-Checked "bun" @("run", "tauri", "build") $DesktopDir
+    }
 }
 
 Write-Host "Build complete."

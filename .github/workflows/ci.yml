@@ -17,28 +17,28 @@ jobs:
         include:
           - os: windows-latest
             artifact_suffix: windows-x64
-            build_command: pwsh scripts/build.ps1 -IdaPlugin
+            build_command: pwsh scripts/build.ps1 -IdaPlugin -DesktopBundles nsis
             plugin_name: soff.dll
             cli_name: soff_cli.exe
             ffi_name: soff_ffi.dll
             bundle_glob: desktop/src-tauri/target/release/bundle/nsis/*.exe
           - os: ubuntu-latest
             artifact_suffix: linux-x64
-            build_command: sh scripts/build.sh --ida-plugin
+            build_command: sh scripts/build.sh --ida-plugin --desktop-bundles deb
             plugin_name: soff.so
             cli_name: soff_cli
             ffi_name: libsoff_ffi.so
             bundle_glob: desktop/src-tauri/target/release/bundle/deb/*.deb
           - os: ubuntu-24.04-arm
             artifact_suffix: linux-arm64
-            build_command: sh scripts/build.sh
+            build_command: sh scripts/build.sh --desktop-bundles deb
             plugin_name: ""
             cli_name: soff_cli
             ffi_name: libsoff_ffi.so
             bundle_glob: desktop/src-tauri/target/release/bundle/deb/*.deb
           - os: macos-latest
             artifact_suffix: macos-arm64
-            build_command: sh scripts/build.sh --ida-plugin
+            build_command: sh scripts/build.sh --ida-plugin --desktop-bundles dmg
             plugin_name: soff.dylib
             cli_name: soff_cli
             ffi_name: libsoff_ffi.dylib
@@ -61,6 +61,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
+            xdg-utils \
             patchelf
 
       - name: Install SQLite (Windows)

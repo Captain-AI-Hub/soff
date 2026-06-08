@@ -6,6 +6,7 @@ IDA_PLUGIN=0
 IDA_SDK="ida-sdk-93-main/src"
 SKIP_SOFF=0
 SKIP_DESKTOP=0
+DESKTOP_BUNDLES=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,6 +30,10 @@ while [ "$#" -gt 0 ]; do
       SKIP_DESKTOP=1
       shift
       ;;
+    --desktop-bundles)
+      DESKTOP_BUNDLES="$2"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage: scripts/build.sh [options]
@@ -39,6 +44,7 @@ Options:
   --ida-sdk PATH         IDA SDK src path, default: ida-sdk-93-main/src
   --skip-soff            Skip xmake build
   --skip-desktop         Skip desktop build
+  --desktop-bundles LIST Build specific Tauri bundles, e.g. deb, nsis, dmg
 EOF
       exit 0
       ;;
@@ -107,7 +113,11 @@ if [ "$SKIP_DESKTOP" -eq 0 ]; then
   if [ ! -d node_modules ]; then
     run bun install
   fi
-  run bun run tauri build
+  if [ -n "$DESKTOP_BUNDLES" ]; then
+    run bun run tauri build -- --bundles "$DESKTOP_BUNDLES"
+  else
+    run bun run tauri build
+  fi
 fi
 
 echo "Build complete."
