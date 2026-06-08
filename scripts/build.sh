@@ -87,13 +87,17 @@ copy_soff_ffi_to_desktop() {
 if [ "$SKIP_SOFF" -eq 0 ]; then
   cd "$REPO_ROOT"
   if [ "$IDA_PLUGIN" -eq 1 ]; then
-    run xmake config -m "$MODE" --ida_plugin=y "--ida_sdk=$IDA_SDK"
+    run xmake config -y -m "$MODE" --ida_plugin=y "--ida_sdk=$IDA_SDK"
     run xmake require -y
-    run xmake build soff_cli soff_smoke soff_ffi soff_ida
+    for target in soff_cli soff_smoke soff_ffi soff_ida; do
+      run xmake build -y "$target"
+    done
   else
-    run xmake config -m "$MODE" --ida_plugin=n
+    run xmake config -y -m "$MODE" --ida_plugin=n
     run xmake require -y
-    run xmake build soff_cli soff_smoke soff_ffi
+    for target in soff_cli soff_smoke soff_ffi; do
+      run xmake build -y "$target"
+    done
   fi
   copy_soff_ffi_to_desktop
 fi

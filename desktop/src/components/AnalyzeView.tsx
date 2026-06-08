@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { SoffConfig } from "../App";
+import type { McpStatus, SoffConfig } from "../App";
 
 interface AnalyzeStats {
   best: number;
@@ -21,13 +21,37 @@ interface Props {
   soffPath: string;
   config: SoffConfig;
   onConfigChange: (config: SoffConfig) => void;
+  mcpStatus: McpStatus | null;
+  mcpBusy: boolean;
+  mcpError: string;
+  mcpBindAddress: string;
+  mcpPort: number;
+  onMcpBindAddressChange: (value: string) => void;
+  onMcpPortChange: (value: number) => void;
+  onStartMcp: () => void;
+  onStopMcp: () => void;
+  onRefreshMcp: () => void;
 }
 
 function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop()?.replace(/\.(idb|i64|sqlite)$/i, "") || path;
 }
 
-export function AnalyzeView({ soffPath, config, onConfigChange }: Props) {
+export function AnalyzeView({
+  soffPath,
+  config,
+  onConfigChange,
+  mcpStatus,
+  mcpBusy,
+  mcpError,
+  mcpBindAddress,
+  mcpPort,
+  onMcpBindAddressChange,
+  onMcpPortChange,
+  onStartMcp,
+  onStopMcp,
+  onRefreshMcp,
+}: Props) {
   const [stats, setStats] = useState<AnalyzeStats | null>(null);
   const [mainDb, setMainDb] = useState(config.main_db);
   const [diffDb, setDiffDb] = useState(config.diff_db);
@@ -104,6 +128,19 @@ export function AnalyzeView({ soffPath, config, onConfigChange }: Props) {
         {pathError && <div className="col-span-3 text-[10px] text-red-400 font-mono">{pathError}</div>}
       </div>
 
+      <McpPanel
+        status={mcpStatus}
+        busy={mcpBusy}
+        error={mcpError}
+        bindAddress={mcpBindAddress}
+        port={mcpPort}
+        onBindAddressChange={onMcpBindAddressChange}
+        onPortChange={onMcpPortChange}
+        onStart={onStartMcp}
+        onStop={onStopMcp}
+        onRefresh={onRefreshMcp}
+      />
+
       <div className="flex gap-5 flex-1 min-h-0">
         <div className="flex flex-col items-center justify-center rounded-xl border border-[var(--border)] p-8 w-[260px] shrink-0 overflow-visible"
              style={{ background: "linear-gradient(145deg, var(--bg-surface), var(--bg-secondary))", boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05)" }}>
@@ -132,6 +169,117 @@ export function AnalyzeView({ soffPath, config, onConfigChange }: Props) {
       </div>
     </div>
   );
+}
+
+function McpPanel({
+  status,
+  busy,
+  error,
+  bindAddress,
+  port,
+  onBindAddressChange,
+  onPortChange,
+  onStart,
+  onStop,
+  onRefresh,
+}: {
+  status: McpStatus | null;
+  busy: boolean;
+  error: string;
+  bindAddress: string;
+  port: number;
+  onBindAddressChange: (value: string) => void;
+  onPortChange: (value: number) => void;
+  onStart: () => void;
+  onStop: () => void;
+  onRefresh: () => void;
+}) {
+  const running = !!status?.running;
+  const endpoint = status?.endpoint || previewEndpoint(bindAddress, port);
+  const callCount = status?.call_count || 0;
+
+  const toggle = () => {
+    if (busy) return;
+    if (running) onStop();
+    else onStart();
+  };
+
+  return (
+    <div className="mx-2 shrink-0 rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] px-4 py-3">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2 w-36 shrink-0">
+          <span className={`w-2.5 h-2.5 rounded-full ${running ? "bg-[var(--green)]" : "bg-[var(--text-muted)]"}`} />
+          <span className="text-[11px] uppercase tracking-wider text-[var(--text-muted)]">MCP</span>
+          <span className={`text-xs font-medium ${running ? "text-[var(--green)]" : "text-[var(--text-secondary)]"}`}>
+            {running ? "Running" : "Stopped"}
+          </span>
+        </div>
+
+        <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={running}
+            disabled={busy}
+            onChange={toggle}
+            className="accent-[var(--accent)]"
+          />
+          {busy ? "Updating" : "Enabled"}
+        </label>
+
+        <select
+          value={bindAddress}
+          disabled={running || busy}
+          onChange={(e) => onBindAddressChange(e.target.value)}
+          className="h-8 px-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent)]"
+        >
+          <option value="127.0.0.1">127.0.0.1</option>
+          <option value="0.0.0.0">0.0.0.0</option>
+          <option value="::1">::1</option>
+        </select>
+
+        <input
+          type="number"
+          min={1}
+          max={65535}
+          value={port}
+          disabled={running || busy}
+          onChange={(e) => onPortChange(clampPort(e.target.value))}
+          className="h-8 w-20 px-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] text-[11px] font-mono text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent)]"
+        />
+
+        <div className="min-w-0 flex-1 font-mono text-[10px] text-[var(--text-muted)] truncate" title={endpoint}>
+          {endpoint}
+        </div>
+
+        <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] shrink-0">
+          Calls
+          <span className="font-mono text-[var(--text-primary)]">{callCount.toLocaleString()}</span>
+        </div>
+
+        <button
+          onClick={onRefresh}
+          disabled={busy}
+          title="Refresh MCP status"
+          className="h-8 px-3 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:border-[var(--accent)] disabled:opacity-40"
+        >
+          Refresh
+        </button>
+      </div>
+      {error && <div className="mt-2 font-mono text-[10px] text-red-400">{error}</div>}
+    </div>
+  );
+}
+
+function clampPort(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed)) return 11339;
+  return Math.min(65535, Math.max(1, parsed));
+}
+
+function previewEndpoint(bindAddress: string, port: number): string {
+  return bindAddress.includes(":")
+    ? `http://[${bindAddress}]:${port}/mcp/`
+    : `http://${bindAddress}:${port}/mcp/`;
 }
 
 function PathButton({ label, value, onClick }: { label: string; value: string; onClick: () => void }) {

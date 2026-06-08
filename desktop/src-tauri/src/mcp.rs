@@ -12,17 +12,23 @@ use similar::{ChangeTag, TextDiff};
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
 const DEFAULT_MCP_PORT: u16 = 11339;
+const DEFAULT_MCP_BIND_ADDRESS: &str = "127.0.0.1";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct McpStatus {
     pub running: bool,
+    pub bind_address: String,
     pub port: u16,
     pub endpoint: String,
+    pub call_count: u64,
 }
 
 struct McpRuntime {
@@ -33,18 +39,25 @@ struct McpRuntime {
 #[derive(Default)]
 pub struct McpServerState {
     runtime: Mutex<Option<McpRuntime>>,
+    call_count: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
 struct SoffMcpService {
     tool_router: ToolRouter<Self>,
+    call_count: Arc<AtomicU64>,
 }
 
 impl SoffMcpService {
-    fn new() -> Self {
+    fn new(call_count: Arc<AtomicU64>) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            call_count,
         }
+    }
+
+    fn record_call(&self) {
+        self.call_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -55,6 +68,7 @@ impl SoffMcpService {
         &self,
         Parameters(request): Parameters<DiffResultsRequest>,
     ) -> Result<Json<DiffResultsResponse>, String> {
+        self.record_call();
         query_diff_results(&request)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -65,6 +79,7 @@ impl SoffMcpService {
         &self,
         Parameters(request): Parameters<UnmatchedRequest>,
     ) -> Result<Json<UnmatchedResponse>, String> {
+        self.record_call();
         query_unmatched(&request)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -77,6 +92,7 @@ impl SoffMcpService {
         &self,
         Parameters(request): Parameters<FunctionDiffRequest>,
     ) -> Result<Json<FunctionDiffResponse>, String> {
+        self.record_call();
         query_function_diff(&request, "assembly")
             .map(Json)
             .map_err(|e| e.to_string())
@@ -89,6 +105,7 @@ impl SoffMcpService {
         &self,
         Parameters(request): Parameters<FunctionDiffRequest>,
     ) -> Result<Json<FunctionDiffResponse>, String> {
+        self.record_call();
         query_function_diff(&request, "pseudocode")
             .map(Json)
             .map_err(|e| e.to_string())
@@ -186,6 +203,7 @@ pub struct FunctionDiffResponse {
 
 pub async fn start_mcp_server(
     state: tauri::State<'_, McpServerState>,
+    bind_address: Option<String>,
     port: Option<u16>,
 ) -> Result<McpStatus, String> {
     if let Some(status) = mcp_status_from_state(&state) {
@@ -193,12 +211,18 @@ pub async fn start_mcp_server(
     }
 
     let port = port.unwrap_or(DEFAULT_MCP_PORT);
-    let bind_addr = format!("127.0.0.1:{port}");
+    let bind_address = bind_address.unwrap_or_else(|| DEFAULT_MCP_BIND_ADDRESS.to_string());
+    validate_bind_address(&bind_address)?;
+    let bind_addr = socket_address(&bind_address, port);
     let listener = TcpListener::bind(&bind_addr).map_err(|e| e.to_string())?;
-    let endpoint = format!("http://{bind_addr}/mcp/");
+    let endpoint = endpoint_url(&bind_address, port);
+    state.call_count.store(0, Ordering::Relaxed);
+    let call_count = state.call_count.clone();
 
     let http_service = StreamableHttpService::builder()
-        .service_factory(Arc::new(|| Ok(SoffMcpService::new())))
+        .service_factory(Arc::new(move || {
+            Ok(SoffMcpService::new(call_count.clone()))
+        }))
         .session_manager(Arc::new(LocalSessionManager::default()))
         .stateful_mode(true)
         .sse_keep_alive(Duration::from_secs(30))
@@ -226,8 +250,10 @@ pub async fn start_mcp_server(
     let handle = server.handle();
     let status = McpStatus {
         running: true,
+        bind_address,
         port,
         endpoint,
+        call_count: 0,
     };
     {
         let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
@@ -248,8 +274,10 @@ pub async fn start_mcp_server(
 pub fn get_mcp_status(state: tauri::State<'_, McpServerState>) -> Result<McpStatus, String> {
     Ok(mcp_status_from_state(&state).unwrap_or_else(|| McpStatus {
         running: false,
+        bind_address: DEFAULT_MCP_BIND_ADDRESS.to_string(),
         port: DEFAULT_MCP_PORT,
         endpoint: format!("http://127.0.0.1:{DEFAULT_MCP_PORT}/mcp/"),
+        call_count: state.call_count.load(Ordering::Relaxed),
     }))
 }
 
@@ -265,11 +293,36 @@ pub async fn stop_mcp_server(state: tauri::State<'_, McpServerState>) -> Result<
 }
 
 fn mcp_status_from_state(state: &tauri::State<'_, McpServerState>) -> Option<McpStatus> {
-    state
-        .runtime
-        .lock()
-        .ok()
-        .and_then(|runtime| runtime.as_ref().map(|runtime| runtime.status.clone()))
+    state.runtime.lock().ok().and_then(|runtime| {
+        runtime.as_ref().map(|runtime| {
+            let mut status = runtime.status.clone();
+            status.call_count = state.call_count.load(Ordering::Relaxed);
+            status
+        })
+    })
+}
+
+fn validate_bind_address(bind_address: &str) -> Result<(), String> {
+    if matches!(bind_address, "127.0.0.1" | "0.0.0.0" | "::1") {
+        return Ok(());
+    }
+    Err("bind_address must be 127.0.0.1, 0.0.0.0, or ::1".to_string())
+}
+
+fn socket_address(bind_address: &str, port: u16) -> String {
+    if bind_address.contains(':') {
+        format!("[{bind_address}]:{port}")
+    } else {
+        format!("{bind_address}:{port}")
+    }
+}
+
+fn endpoint_url(bind_address: &str, port: u16) -> String {
+    if bind_address.contains(':') {
+        format!("http://[{bind_address}]:{port}/mcp/")
+    } else {
+        format!("http://{bind_address}:{port}/mcp/")
+    }
 }
 
 async fn health() -> HttpResponse {

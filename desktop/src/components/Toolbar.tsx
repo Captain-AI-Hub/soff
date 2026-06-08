@@ -1,7 +1,6 @@
 import type { SoffConfig } from "../App";
 
 interface Props {
-  onOpen: () => void;
   config: SoffConfig | null;
   filter: string;
   onFilter: (f: string) => void;
@@ -17,23 +16,12 @@ const filters = [
   { key: "unmatched", label: "Unmatched" },
 ];
 
-export function Toolbar({ onOpen, config, filter, onFilter, searchQuery, onSearch }: Props) {
+export function Toolbar({ config, filter, onFilter, searchQuery, onSearch }: Props) {
   return (
     <div className="shrink-0 bg-[var(--bg-secondary)] border-b border-[var(--border)] select-none">
       <div className="flex items-center h-12 px-4 gap-4">
-        {/* Open button */}
-        <button
-          onClick={onOpen}
-          className="px-4 py-2 text-sm font-medium bg-[var(--bg-surface)] border border-[var(--border)]
-                     hover:bg-[var(--bg-hover)] hover:border-[var(--text-muted)] rounded-md transition-all duration-150"
-        >
-          Open
-        </button>
-
         {config && (
           <>
-            <div className="w-px h-6 bg-[var(--border)]" />
-
             {/* Filter tabs */}
             <div className="flex gap-1">
               {filters.map((f) => (

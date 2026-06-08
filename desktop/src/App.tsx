@@ -31,10 +31,12 @@ export interface DiffMatch {
   description: string;
 }
 
-interface McpStatus {
+export interface McpStatus {
   running: boolean;
+  bind_address: string;
   port: number;
   endpoint: string;
+  call_count: number;
 }
 
 interface UnmatchedFunction {
@@ -55,10 +57,15 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [mcpBindAddress, setMcpBindAddress] = useState("127.0.0.1");
+  const [mcpPort, setMcpPort] = useState(11339);
+  const [mcpError, setMcpError] = useState("");
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    invoke<McpStatus>("get_mcp_status").then(setMcpStatus).catch(() => {});
+    refreshMcpStatus();
+    const timer = setInterval(refreshMcpStatus, 3000);
+    return () => clearInterval(timer);
   }, []);
 
   const handleOpen = async () => {
@@ -89,12 +96,44 @@ export default function App() {
   const handleStartMcp = async () => {
     if (mcpBusy) return;
     setMcpBusy(true);
+    setMcpError("");
     try {
-      const status = await invoke<McpStatus>("start_mcp_server", { port: null });
+      const status = await invoke<McpStatus>("start_mcp_server", {
+        bindAddress: mcpBindAddress,
+        port: mcpPort,
+      });
       setMcpStatus(status);
+    } catch (e) {
+      setMcpError(String(e));
     } finally {
       setMcpBusy(false);
     }
+  };
+
+  const handleStopMcp = async () => {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    setMcpError("");
+    try {
+      const status = await invoke<McpStatus>("stop_mcp_server");
+      setMcpStatus(status);
+    } catch (e) {
+      setMcpError(String(e));
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const refreshMcpStatus = () => {
+    invoke<McpStatus>("get_mcp_status")
+      .then((status) => {
+        setMcpStatus(status);
+        if (status.running) {
+          setMcpBindAddress(status.bind_address);
+          setMcpPort(status.port);
+        }
+      })
+      .catch(() => {});
   };
 
   const loadFilteredMatches = async (type: string) => {
@@ -166,23 +205,35 @@ export default function App() {
         page={page}
         onPageChange={setPage}
         hasData={!!config}
-        mcpRunning={!!mcpStatus?.running}
-        mcpEndpoint={mcpStatus?.endpoint || ""}
-        mcpBusy={mcpBusy}
-        onStartMcp={handleStartMcp}
       />
       <div className="flex flex-col flex-1 min-w-0">
         {!config && page !== "soff" && page !== "diff" && <EmptyState onOpen={handleOpen} />}
 
         {page === "analyze" && config && (
-          <AnalyzeView soffPath={soffPath} config={config} onConfigChange={setConfig} />
+          <AnalyzeView
+            soffPath={soffPath}
+            config={config}
+            onConfigChange={setConfig}
+            mcpStatus={mcpStatus}
+            mcpBusy={mcpBusy}
+            mcpError={mcpError}
+            mcpBindAddress={mcpBindAddress}
+            mcpPort={mcpPort}
+            onMcpBindAddressChange={setMcpBindAddress}
+            onMcpPortChange={setMcpPort}
+            onStartMcp={handleStartMcp}
+            onStopMcp={handleStopMcp}
+            onRefreshMcp={refreshMcpStatus}
+          />
         )}
 
         {page === "soff" && (
           <>
-            <Toolbar onOpen={handleOpen} config={config} filter={filter} onFilter={loadFilteredMatches} searchQuery={searchQuery} onSearch={handleSearch} />
             {config ? (
-              <MatchTable matches={filtered} selected={selected} onSelect={handleSelectMatch} />
+              <>
+                <Toolbar config={config} filter={filter} onFilter={loadFilteredMatches} searchQuery={searchQuery} onSearch={handleSearch} />
+                <MatchTable matches={filtered} selected={selected} onSelect={handleSelectMatch} />
+              </>
             ) : (
               <EmptyState onOpen={handleOpen} />
             )}

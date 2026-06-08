@@ -58,7 +58,7 @@ function Copy-SoffFfiToDesktop {
 }
 
 if (-not $SkipSoff) {
-    $configArgs = @("config", "-m", $Mode)
+    $configArgs = @("config", "-y", "-m", $Mode)
     if ($IdaPlugin) {
         $configArgs += @("--ida_plugin=y", "--ida_sdk=$IdaSdk")
     }
@@ -69,11 +69,13 @@ if (-not $SkipSoff) {
     Invoke-Checked "xmake" $configArgs
     Invoke-Checked "xmake" @("require", "-y")
 
-    $targets = @("build", "soff_cli", "soff_smoke", "soff_ffi")
+    $targets = @("soff_cli", "soff_smoke", "soff_ffi")
     if ($IdaPlugin) {
         $targets += "soff_ida"
     }
-    Invoke-Checked "xmake" $targets
+    foreach ($target in $targets) {
+        Invoke-Checked "xmake" @("build", "-y", $target)
+    }
     Copy-SoffFfiToDesktop
 }
 

@@ -4,10 +4,6 @@ interface Props {
   page: Page;
   onPageChange: (p: Page) => void;
   hasData: boolean;
-  mcpRunning: boolean;
-  mcpEndpoint: string;
-  mcpBusy: boolean;
-  onStartMcp: () => void;
 }
 
 const items: { key: Page; icon: React.ReactNode; label: string }[] = [
@@ -58,7 +54,7 @@ const items: { key: Page; icon: React.ReactNode; label: string }[] = [
   },
 ];
 
-export function Sidebar({ page, onPageChange, hasData, mcpRunning, mcpEndpoint, mcpBusy, onStartMcp }: Props) {
+export function Sidebar({ page, onPageChange, hasData }: Props) {
   return (
     <div className="w-12 shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col items-center py-2 gap-1">
       {items.map((item) => {
@@ -81,26 +77,6 @@ export function Sidebar({ page, onPageChange, hasData, mcpRunning, mcpEndpoint, 
           </button>
         );
       })}
-      <div className="flex-1" />
-      <button
-        onClick={onStartMcp}
-        disabled={mcpRunning || mcpBusy}
-        title={mcpRunning ? `MCP running at ${mcpEndpoint}` : "Start MCP"}
-        className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-100 text-[9px] font-mono ${
-          mcpRunning
-            ? "bg-[var(--green-bg)] text-[var(--green)]"
-            : mcpBusy
-            ? "text-[var(--text-muted)]/50 cursor-wait"
-            : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-        }`}
-      >
-        MCP
-        <span
-          className={`absolute right-1.5 top-1.5 w-1.5 h-1.5 rounded-full ${
-            mcpRunning ? "bg-[var(--green)]" : "bg-[var(--text-muted)]"
-          }`}
-        />
-      </button>
     </div>
   );
 }

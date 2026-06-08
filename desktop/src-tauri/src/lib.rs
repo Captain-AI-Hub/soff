@@ -296,10 +296,6 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
     CfgData { blocks }
 }
 
-fn find_target_block(_block_starts: &[usize], _lines: &[&str], _jump_line: &str) -> Option<usize> {
-    None // unused now
-}
-
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct AnalyzeStats {
     pub best: u32,
@@ -336,9 +332,10 @@ fn get_analyze_stats(path: String) -> Result<AnalyzeStats, String> {
 #[tauri::command]
 async fn start_mcp_server(
     state: tauri::State<'_, McpServerState>,
+    bind_address: Option<String>,
     port: Option<u16>,
 ) -> Result<McpStatus, String> {
-    mcp::start_mcp_server(state, port).await
+    mcp::start_mcp_server(state, bind_address, port).await
 }
 
 #[tauri::command]
