@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-High-performance binary diff engine for IDA Pro. Exports function features from IDA databases and compares them using 40+ heuristics to identify matching, modified, and unmatched functions across binary versions.
+High-performance binary diff engine for IDA Pro. Exports function features from IDA databases and compares them using 40+ heuristics to identify matching, modified, and unmatched functions across binary versions. Soff also exposes diff results through a local MCP server so agentic tools can query matches, unmatched functions, assembly diffs, and pseudocode diffs.
 
 ![Analyze View](img/analyze.png)
 
@@ -13,6 +13,7 @@ High-performance binary diff engine for IDA Pro. Exports function features from 
 | `soff.dll` / `.so` / `.dylib` | IDA Pro plugin (IDA 9.0+) |
 | `soff_cli` | Command-line diff tool |
 | `soff-desktop` | Standalone result viewer (Tauri app) |
+| `soff-mcp` | Local Model Context Protocol server launched from the desktop app |
 
 ## Installation
 
@@ -100,6 +101,30 @@ soff_cli diff primary.sqlite secondary.sqlite -o results.soff
 # View summary
 soff_cli info results.soff
 ```
+
+---
+
+### MCP Server
+
+The desktop app can start a local Soff MCP server for agentic workflows. By
+default it listens on:
+
+```text
+http://127.0.0.1:11339/mcp/
+```
+
+The MCP server exposes `.soff` result data and source database details through
+tools for:
+
+| Tool | Description |
+|------|-------------|
+| `soff_diff_results` | Query matched function pairs by match type, limit, and offset |
+| `soff_diff_unmatched` | Query unmatched primary or secondary functions |
+| `soff_diff_asm` | Generate a unified assembly diff for a matched function pair |
+| `soff_diff_pseudo` | Generate a unified pseudocode diff for a matched function pair |
+
+Use this when an MCP-capable assistant or automation tool needs structured
+access to binary diff results without scraping the desktop UI.
 
 ## IDA Chooser Fields
 

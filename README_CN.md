@@ -1,6 +1,6 @@
 # Soff
 
-高性能 IDA Pro 二进制差异分析引擎。从 IDA 数据库导出函数特征，使用 40+ 启发式算法识别跨版本的匹配、修改和未匹配函数。
+高性能 IDA Pro 二进制差异分析引擎。从 IDA 数据库导出函数特征，使用 40+ 启发式算法识别跨版本的匹配、修改和未匹配函数。Soff 还可以通过本地 MCP 服务暴露差异结果，方便智能体工具查询匹配函数、未匹配函数、汇编差异和伪代码差异。
 
 ![分析视图](img/analyze.png)
 
@@ -11,6 +11,7 @@
 | `soff.dll` / `.so` / `.dylib` | IDA Pro 插件 (IDA 9.0+) |
 | `soff_cli` | 命令行差异工具 |
 | `soff-desktop` | 独立结果查看器 (Tauri 应用) |
+| `soff-mcp` | 由桌面应用启动的本地 Model Context Protocol 服务 |
 
 ## 安装
 
@@ -98,6 +99,27 @@ soff_cli diff primary.sqlite secondary.sqlite -o results.soff
 # 查看摘要
 soff_cli info results.soff
 ```
+
+---
+
+### MCP 服务
+
+桌面应用可以启动本地 Soff MCP 服务，用于智能体工作流。默认监听地址：
+
+```text
+http://127.0.0.1:11339/mcp/
+```
+
+MCP 服务以结构化方式暴露 `.soff` 结果和源数据库信息，提供以下工具：
+
+| 工具 | 说明 |
+|------|------|
+| `soff_diff_results` | 按匹配类型、limit 和 offset 查询匹配函数对 |
+| `soff_diff_unmatched` | 查询 primary 或 secondary 侧未匹配函数 |
+| `soff_diff_asm` | 为匹配函数对生成 unified 汇编 diff |
+| `soff_diff_pseudo` | 为匹配函数对生成 unified 伪代码 diff |
+
+当 MCP 客户端、智能体助手或自动化工具需要读取二进制差异结果时，可以直接使用该服务，无需从桌面 UI 中提取数据。
 
 ## IDA Chooser 字段说明
 
