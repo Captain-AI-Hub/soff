@@ -111,7 +111,11 @@ fi
 if [ "$SKIP_DESKTOP" -eq 0 ]; then
   cd "$DESKTOP_DIR"
   if [ ! -d node_modules ]; then
-    run bun install
+    if [ "${CI:-}" = "true" ]; then
+      run bun install --frozen-lockfile
+    else
+      run bun install
+    fi
   fi
   if [ -n "$DESKTOP_BUNDLES" ]; then
     run bun run tauri build --bundles "$DESKTOP_BUNDLES"

@@ -82,7 +82,11 @@ if (-not $SkipSoff) {
 
 if (-not $SkipDesktop) {
     if (-not (Test-Path (Join-Path $DesktopDir "node_modules"))) {
-        Invoke-Checked "bun" @("install") $DesktopDir
+        $installArgs = @("install")
+        if ($env:CI -eq "true") {
+            $installArgs += "--frozen-lockfile"
+        }
+        Invoke-Checked "bun" $installArgs $DesktopDir
     }
     if ($DesktopBundles) {
         Invoke-Checked "bun" @("run", "tauri", "build", "--bundles", $DesktopBundles) $DesktopDir
