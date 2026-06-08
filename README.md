@@ -142,6 +142,19 @@ xmake build -y
 cd desktop && bun install && bun run tauri build
 ```
 
+One-command build scripts are also available. They build Soff, copy `soff_ffi`
+into the Tauri resources directory, then build the desktop app:
+
+```bash
+# Windows
+pwsh scripts/build.ps1
+
+# macOS / Linux
+sh scripts/build.sh
+```
+
+Pass `--ida-plugin` to also build the IDA plugin target.
+
 ## License
 
 MIT

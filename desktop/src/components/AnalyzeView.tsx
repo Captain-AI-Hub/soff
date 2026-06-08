@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { SoffConfig } from "../App";
 
 interface AnalyzeStats {
@@ -16,18 +17,55 @@ interface AnalyzeStats {
   ratio_distribution: number[];
 }
 
-interface Props { soffPath: string; config: SoffConfig; }
+interface Props {
+  soffPath: string;
+  config: SoffConfig;
+  onConfigChange: (config: SoffConfig) => void;
+}
 
 function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop()?.replace(/\.(idb|i64|sqlite)$/i, "") || path;
 }
 
-export function AnalyzeView({ soffPath, config }: Props) {
+export function AnalyzeView({ soffPath, config, onConfigChange }: Props) {
   const [stats, setStats] = useState<AnalyzeStats | null>(null);
+  const [mainDb, setMainDb] = useState(config.main_db);
+  const [diffDb, setDiffDb] = useState(config.diff_db);
+  const [savingPaths, setSavingPaths] = useState(false);
+  const [pathError, setPathError] = useState("");
   useEffect(() => { invoke<AnalyzeStats>("get_analyze_stats", { path: soffPath }).then(setStats); }, [soffPath]);
+  useEffect(() => {
+    setMainDb(config.main_db);
+    setDiffDb(config.diff_db);
+    setPathError("");
+  }, [config.main_db, config.diff_db]);
 
-  const primaryName = basename(config.main_db);
-  const secondaryName = basename(config.diff_db);
+  const primaryName = basename(mainDb);
+  const secondaryName = basename(diffDb);
+  const pathsChanged = mainDb !== config.main_db || diffDb !== config.diff_db;
+
+  const pickSqlite = async (setter: (path: string) => void) => {
+    const path = await open({ filters: [{ name: "SQLite", extensions: ["sqlite", "db"] }] });
+    if (path) setter(path);
+  };
+
+  const savePaths = async () => {
+    if (!pathsChanged || savingPaths) return;
+    setSavingPaths(true);
+    setPathError("");
+    try {
+      const next = await invoke<SoffConfig>("update_soff_paths", {
+        path: soffPath,
+        mainDb,
+        diffDb,
+      });
+      onConfigChange(next);
+    } catch (e) {
+      setPathError(String(e));
+    } finally {
+      setSavingPaths(false);
+    }
+  };
 
   if (!stats) return <div className="flex-1 flex items-center justify-center"><div className="animate-glow w-2 h-2 rounded-full bg-[var(--accent)]" /></div>;
 
@@ -51,6 +89,19 @@ export function AnalyzeView({ soffPath, config }: Props) {
           <span className="text-[10px] text-[var(--text-muted)]">Secondary</span>
         </div>
         <span className="ml-auto text-[11px] text-[var(--text-muted)]">{config.date}</span>
+      </div>
+
+      <div className="grid grid-cols-[1fr_1fr_auto] gap-2 px-2 shrink-0 items-center">
+        <PathButton label="Primary DB" value={mainDb} onClick={() => pickSqlite(setMainDb)} />
+        <PathButton label="Secondary DB" value={diffDb} onClick={() => pickSqlite(setDiffDb)} />
+        <button
+          onClick={savePaths}
+          disabled={!pathsChanged || savingPaths}
+          className="h-9 px-3 rounded-lg text-[11px] font-medium bg-[var(--bg-surface)] border border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--accent)] disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {savingPaths ? "Saving..." : "Update paths"}
+        </button>
+        {pathError && <div className="col-span-3 text-[10px] text-red-400 font-mono">{pathError}</div>}
       </div>
 
       <div className="flex gap-5 flex-1 min-h-0">
@@ -80,6 +131,19 @@ export function AnalyzeView({ soffPath, config }: Props) {
         <CompareCard label="Total Functions" left={totalMatched + stats.unmatched_primary} right={totalMatched + stats.unmatched_secondary} />
       </div>
     </div>
+  );
+}
+
+function PathButton({ label, value, onClick }: { label: string; value: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title={value}
+      className="h-9 min-w-0 text-left px-3 rounded-lg bg-[var(--bg-surface)] border border-[var(--border)] hover:border-[var(--accent)] transition-colors"
+    >
+      <span className="block text-[9px] uppercase tracking-wider text-[var(--text-muted)]">{label}</span>
+      <span className="block text-[11px] font-mono text-[var(--text-secondary)] truncate">{value || "Select..."}</span>
+    </button>
   );
 }
 

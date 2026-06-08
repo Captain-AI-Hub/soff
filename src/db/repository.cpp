@@ -133,7 +133,7 @@ struct SnapshotInsertStatements
 {
     explicit SnapshotInsertStatements(db::Database& database)
         : function(database.prepare(
-              "insert into functions (name, address, rva, segment_rva, nodes, edges, size, instructions, "
+              "insert or replace into functions (name, address, rva, segment_rva, nodes, edges, size, instructions, "
               "indegree, outdegree, cyclomatic_complexity, primes_value, strongly_connected, loops, "
               "tarjan_topological_sort, strongly_connected_spp, mnemonics_spp, switches, mnemonics, names, "
               "prototype, mangled_function, bytes_hash, assembly, prototype2, function_flags, "

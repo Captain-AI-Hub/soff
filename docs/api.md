@@ -74,36 +74,41 @@ DIAPHORA_EXPORT_FILE=output.sqlite    # override export path
 DIAPHORA_AUTO=1                       # headless mode in IDA
 ```
 
-## MCP Tools (IDA-MCP)
+## MCP Tools (soff-mcp)
 
-Available via `api_soff.py` in the IDA-MCP gateway:
+The desktop app can start an independent Soff MCP server implemented with `rmcp`.
+By default it listens on:
 
-### soff_export (requires IDA)
-Export current IDB to SQLite.
 ```
-soff_export(output_path="C:/out.sqlite")
-→ {"exported": 84, "skipped": 5, "total": 89, "output": "..."}
+http://127.0.0.1:11339/mcp/
 ```
 
-### soff_diff_results (no IDA needed)
-Query matches/unmatched from a .soff file.
+### soff_diff_results
+Query matched function pairs from a `.soff` file.
 ```
 soff_diff_results(result_path="r.soff", match_type="best", limit=100, offset=0)
 → {"main_db": "...", "diff_db": "...", "total": 42, "items": [...]}
 ```
 
-### soff_diff_asm (no IDA needed)
-Unified diff of two functions' assembly.
+### soff_diff_unmatched
+Query unmatched functions from a `.soff` file.
 ```
-soff_diff_asm(main_db="a.sqlite", diff_db="b.sqlite",
+soff_diff_unmatched(result_path="r.soff", side="primary", limit=100, offset=0)
+→ {"total": 12, "items": [...]}
+```
+
+### soff_diff_asm
+Unified diff of two functions' assembly. The primary/secondary SQLite paths are read from the `.soff` config.
+```
+soff_diff_asm(result_path="r.soff",
               primary_addr="0x140001000", secondary_addr="0x140001000")
 → " push rbp\n mov rbp, rsp\n-mov ecx, [rsp+8]\n+mov ecx, [rsp+10h]\n"
 ```
 
-### soff_diff_pseudo (no IDA needed)
-Unified diff of two functions' pseudocode.
+### soff_diff_pseudo
+Unified diff of two functions' pseudocode. The primary/secondary SQLite paths are read from the `.soff` config.
 ```
-soff_diff_pseudo(main_db="a.sqlite", diff_db="b.sqlite",
+soff_diff_pseudo(result_path="r.soff",
                  primary_addr="5368709120", secondary_addr="5368709120")
 → unified diff text
 ```
@@ -145,12 +150,16 @@ Tauri 2 + React + TypeScript. Reads .soff and .sqlite directly via rusqlite.
 | Command | Parameters | Returns |
 |---------|-----------|---------|
 | open_soff | path | SoffConfig (main_db, diff_db, totals) |
+| update_soff_paths | path, main_db, diff_db | SoffConfig |
 | get_matches | path, match_type, limit, offset | Vec<DiffMatch> |
 | get_unmatched | path, limit, offset | Vec<UnmatchedFunction> |
 | get_function_assembly | db_path, address | String |
 | get_function_pseudocode | db_path, address | String |
 | get_function_info | db_path, address | FunctionInfo |
 | compute_diff | left, right | Vec<String> (unified diff lines) |
+| start_mcp_server | port? | McpStatus (endpoint, port, running) |
+| get_mcp_status | | McpStatus |
+| stop_mcp_server | | McpStatus |
 
 ### Build
 

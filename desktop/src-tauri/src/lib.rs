@@ -1,6 +1,8 @@
 mod db;
+mod mcp;
 
 use db::{DiffMatch, FunctionInfo, SoffConfig, UnmatchedFunction};
+use mcp::{McpServerState, McpStatus};
 
 #[tauri::command]
 fn open_soff(path: String) -> Result<SoffConfig, String> {
@@ -8,7 +10,17 @@ fn open_soff(path: String) -> Result<SoffConfig, String> {
 }
 
 #[tauri::command]
-fn get_matches(path: String, match_type: String, limit: u32, offset: u32) -> Result<Vec<DiffMatch>, String> {
+fn update_soff_paths(path: String, main_db: String, diff_db: String) -> Result<SoffConfig, String> {
+    db::update_soff_paths(&path, &main_db, &diff_db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_matches(
+    path: String,
+    match_type: String,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<DiffMatch>, String> {
     db::query_matches(&path, &match_type, limit, offset).map_err(|e| e.to_string())
 }
 
@@ -18,12 +30,21 @@ fn get_unmatched(path: String, limit: u32, offset: u32) -> Result<Vec<UnmatchedF
 }
 
 #[tauri::command]
-fn search_matches(path: String, query: String, match_type: String, limit: u32) -> Result<Vec<DiffMatch>, String> {
+fn search_matches(
+    path: String,
+    query: String,
+    match_type: String,
+    limit: u32,
+) -> Result<Vec<DiffMatch>, String> {
     db::search_matches(&path, &query, &match_type, limit).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn search_unmatched(path: String, query: String, limit: u32) -> Result<Vec<UnmatchedFunction>, String> {
+fn search_unmatched(
+    path: String,
+    query: String,
+    limit: u32,
+) -> Result<Vec<UnmatchedFunction>, String> {
     db::search_unmatched(&path, &query, limit).map_err(|e| e.to_string())
 }
 
@@ -76,13 +97,25 @@ fn compute_aligned_diff(left: String, right: String) -> Vec<DiffPair> {
         let text = change.value().trim_end().to_string();
         match change.tag() {
             ChangeTag::Equal => {
-                result.push(DiffPair { left: text.clone(), right: text, kind: "equal".into() });
+                result.push(DiffPair {
+                    left: text.clone(),
+                    right: text,
+                    kind: "equal".into(),
+                });
             }
             ChangeTag::Delete => {
-                result.push(DiffPair { left: text, right: String::new(), kind: "removed".into() });
+                result.push(DiffPair {
+                    left: text,
+                    right: String::new(),
+                    kind: "removed".into(),
+                });
             }
             ChangeTag::Insert => {
-                result.push(DiffPair { left: String::new(), right: text, kind: "added".into() });
+                result.push(DiffPair {
+                    left: String::new(),
+                    right: text,
+                    kind: "added".into(),
+                });
             }
         }
     }
@@ -103,7 +136,8 @@ pub struct CfgData {
 
 #[tauri::command]
 fn extract_cfg(db_path: String, address: String) -> Result<CfgData, String> {
-    let asm = db::query_function_column(&db_path, &address, "assembly").map_err(|e| e.to_string())?;
+    let asm =
+        db::query_function_column(&db_path, &address, "assembly").map_err(|e| e.to_string())?;
     Ok(parse_cfg_from_asm(&asm))
 }
 
@@ -114,14 +148,40 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
     }
 
     let is_jump = |m: &str| -> bool {
-        matches!(m, "jmp"|"je"|"jne"|"jz"|"jnz"|"jg"|"jl"|"jge"|"jle"|
-            "ja"|"jb"|"jae"|"jbe"|"jc"|"jnc"|"jo"|"jno"|"js"|"jns"|
-            "jp"|"jnp"|"jcxz"|"jecxz"|"jrcxz"|"loop")
+        matches!(
+            m,
+            "jmp"
+                | "je"
+                | "jne"
+                | "jz"
+                | "jnz"
+                | "jg"
+                | "jl"
+                | "jge"
+                | "jle"
+                | "ja"
+                | "jb"
+                | "jae"
+                | "jbe"
+                | "jc"
+                | "jnc"
+                | "jo"
+                | "jno"
+                | "js"
+                | "jns"
+                | "jp"
+                | "jnp"
+                | "jcxz"
+                | "jecxz"
+                | "jrcxz"
+                | "loop"
+        )
     };
-    let is_ret = |m: &str| -> bool { matches!(m, "ret"|"retn") };
+    let is_ret = |m: &str| -> bool { matches!(m, "ret" | "retn") };
 
     // Collect all labels (lines ending with ':' or containing ':' before code)
-    let mut label_lines: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut label_lines: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         if let Some(colon_pos) = t.find(':') {
@@ -141,7 +201,9 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
             let colon_pos = t.find(':').unwrap();
             let before = t[..colon_pos].trim();
             if !before.is_empty() && !before.contains(' ') {
-                if !block_starts.contains(&i) { block_starts.push(i); }
+                if !block_starts.contains(&i) {
+                    block_starts.push(i);
+                }
             }
         }
         // After jump/ret, next line starts new block
@@ -149,10 +211,15 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
         // Skip label prefix if present
         let mnemonic = if mnemonic.ends_with(':') {
             t.split_whitespace().nth(1).unwrap_or("")
-        } else { mnemonic }.to_lowercase();
+        } else {
+            mnemonic
+        }
+        .to_lowercase();
 
         if (is_jump(&mnemonic) || is_ret(&mnemonic)) && i + 1 < lines.len() {
-            if !block_starts.contains(&(i + 1)) { block_starts.push(i + 1); }
+            if !block_starts.contains(&(i + 1)) {
+                block_starts.push(i + 1);
+            }
         }
     }
     block_starts.sort();
@@ -181,19 +248,29 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
                 // Find target
                 let operand = parts.get(mn_idx + 1).unwrap_or(&"");
                 // Remove "short", "near", "far" prefixes
-                let target_name = operand.trim_start_matches("short ")
+                let target_name = operand
+                    .trim_start_matches("short ")
                     .trim_start_matches("near ")
                     .trim_end_matches(',')
                     .to_lowercase();
                 // Also check next part if operand was "short"
                 let target_name = if target_name == "short" || target_name == "near" {
-                    parts.get(mn_idx + 2).unwrap_or(&"").trim_end_matches(',').to_lowercase()
-                } else { target_name };
+                    parts
+                        .get(mn_idx + 2)
+                        .unwrap_or(&"")
+                        .trim_end_matches(',')
+                        .to_lowercase()
+                } else {
+                    target_name
+                };
 
                 if let Some(&target_line) = label_lines.get(&target_name) {
                     // Find which block contains this line
                     for (ti, &ts) in block_starts.iter().enumerate() {
-                        if ts == target_line { succs.push(ti); break; }
+                        if ts == target_line {
+                            succs.push(ti);
+                            break;
+                        }
                     }
                 }
                 // Conditional jumps also fall through
@@ -202,12 +279,18 @@ fn parse_cfg_from_asm(asm: &str) -> CfgData {
                 }
             } else {
                 // Fallthrough
-                if bi + 1 < block_starts.len() { succs.push(bi + 1); }
+                if bi + 1 < block_starts.len() {
+                    succs.push(bi + 1);
+                }
             }
         }
         succs.sort();
         succs.dedup();
-        blocks.push(BasicBlock { id: bi, lines: block_lines, successors: succs });
+        blocks.push(BasicBlock {
+            id: bi,
+            lines: block_lines,
+            successors: succs,
+        });
     }
 
     CfgData { blocks }
@@ -236,12 +319,36 @@ pub struct AnalyzeStats {
 fn get_analyze_stats(path: String) -> Result<AnalyzeStats, String> {
     let s = db::query_analyze_stats(&path).map_err(|e| e.to_string())?;
     Ok(AnalyzeStats {
-        best: s.best, partial: s.partial, unreliable: s.unreliable,
-        unmatched_primary: s.unmatched_primary, unmatched_secondary: s.unmatched_secondary,
-        avg_ratio: s.avg_ratio, total_nodes_primary: s.total_nodes_primary,
-        total_nodes_secondary: s.total_nodes_secondary, total_edges_primary: s.total_edges_primary,
-        total_edges_secondary: s.total_edges_secondary, ratio_distribution: s.ratio_distribution,
+        best: s.best,
+        partial: s.partial,
+        unreliable: s.unreliable,
+        unmatched_primary: s.unmatched_primary,
+        unmatched_secondary: s.unmatched_secondary,
+        avg_ratio: s.avg_ratio,
+        total_nodes_primary: s.total_nodes_primary,
+        total_nodes_secondary: s.total_nodes_secondary,
+        total_edges_primary: s.total_edges_primary,
+        total_edges_secondary: s.total_edges_secondary,
+        ratio_distribution: s.ratio_distribution,
     })
+}
+
+#[tauri::command]
+async fn start_mcp_server(
+    state: tauri::State<'_, McpServerState>,
+    port: Option<u16>,
+) -> Result<McpStatus, String> {
+    mcp::start_mcp_server(state, port).await
+}
+
+#[tauri::command]
+fn get_mcp_status(state: tauri::State<'_, McpServerState>) -> Result<McpStatus, String> {
+    mcp::get_mcp_status(state)
+}
+
+#[tauri::command]
+async fn stop_mcp_server(state: tauri::State<'_, McpServerState>) -> Result<McpStatus, String> {
+    mcp::stop_mcp_server(state).await
 }
 
 use std::ffi::{CStr, CString};
@@ -265,22 +372,38 @@ fn find_soff_ffi_path() -> Result<std::path::PathBuf, String> {
         .ok_or("no parent dir")?
         .to_path_buf();
 
-    let name = if cfg!(windows) { "soff_ffi.dll" }
-        else if cfg!(target_os = "macos") { "libsoff_ffi.dylib" }
-        else { "libsoff_ffi.so" };
+    let name = if cfg!(windows) {
+        "soff_ffi.dll"
+    } else if cfg!(target_os = "macos") {
+        "libsoff_ffi.dylib"
+    } else {
+        "libsoff_ffi.so"
+    };
 
     let candidate = exe_dir.join(name);
-    if candidate.exists() { return Ok(candidate); }
+    if candidate.exists() {
+        return Ok(candidate);
+    }
 
     let resources = exe_dir.join("resources").join(name);
-    if resources.exists() { return Ok(resources); }
+    if resources.exists() {
+        return Ok(resources);
+    }
 
     // Dev: xmake build output
     let dev_candidates = [
-        exe_dir.join("../../../../build/windows/x64/release").join(name),
-        exe_dir.join("../../../../build/linux/x86_64/release").join(name),
-        exe_dir.join("../../../../build/macosx/arm64/release").join(name),
-        exe_dir.join("../../../../build/macosx/x86_64/release").join(name),
+        exe_dir
+            .join("../../../../build/windows/x64/release")
+            .join(name),
+        exe_dir
+            .join("../../../../build/linux/x86_64/release")
+            .join(name),
+        exe_dir
+            .join("../../../../build/macosx/arm64/release")
+            .join(name),
+        exe_dir
+            .join("../../../../build/macosx/x86_64/release")
+            .join(name),
     ];
     for p in &dev_candidates {
         if p.exists() {
@@ -296,9 +419,13 @@ struct ChannelUserdata {
 }
 
 extern "C" fn progress_callback(json_line: *const c_char, userdata: *mut c_void) {
-    if json_line.is_null() || userdata.is_null() { return; }
+    if json_line.is_null() || userdata.is_null() {
+        return;
+    }
     let data = unsafe { &*(userdata as *const ChannelUserdata) };
-    let line = unsafe { CStr::from_ptr(json_line) }.to_string_lossy().to_string();
+    let line = unsafe { CStr::from_ptr(json_line) }
+        .to_string_lossy()
+        .to_string();
     let _ = data.channel.send(line);
 }
 
@@ -322,11 +449,19 @@ async fn run_diff(
                 let lib = libloading::Library::new(&lib_path)
                     .map_err(|e| format!("failed to load soff_ffi: {}", e))?;
 
-                let soff_diff_run: libloading::Symbol<unsafe extern "C" fn(
-                    *const c_char, *const c_char, *const c_char,
-                    *const SoffDiffOptions, SoffProgressFn, *mut c_void,
-                    *mut c_char, c_int,
-                ) -> c_int> = lib.get(b"soff_diff_run")
+                let soff_diff_run: libloading::Symbol<
+                    unsafe extern "C" fn(
+                        *const c_char,
+                        *const c_char,
+                        *const c_char,
+                        *const SoffDiffOptions,
+                        SoffProgressFn,
+                        *mut c_void,
+                        *mut c_char,
+                        c_int,
+                    ) -> c_int,
+                > = lib
+                    .get(b"soff_diff_run")
                     .map_err(|e| format!("symbol not found: {}", e))?;
 
                 let c_primary = CString::new(primary_db).map_err(|e| e.to_string())?;
@@ -346,14 +481,20 @@ async fn run_diff(
                 let userdata_ptr = &userdata as *const ChannelUserdata as *mut c_void;
 
                 let ret = soff_diff_run(
-                    c_primary.as_ptr(), c_secondary.as_ptr(), c_output.as_ptr(),
-                    &options, progress_callback, userdata_ptr,
-                    error_buf.as_mut_ptr() as *mut c_char, 1024,
+                    c_primary.as_ptr(),
+                    c_secondary.as_ptr(),
+                    c_output.as_ptr(),
+                    &options,
+                    progress_callback,
+                    userdata_ptr,
+                    error_buf.as_mut_ptr() as *mut c_char,
+                    1024,
                 );
 
                 if ret != 0 {
                     let err = CStr::from_ptr(error_buf.as_ptr() as *const c_char)
-                        .to_string_lossy().to_string();
+                        .to_string_lossy()
+                        .to_string();
                     return Err(err);
                 }
                 Ok(output)
@@ -368,10 +509,12 @@ async fn run_diff(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(McpServerState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             open_soff,
+            update_soff_paths,
             get_matches,
             get_unmatched,
             search_matches,
@@ -384,6 +527,9 @@ pub fn run() {
             get_analyze_stats,
             extract_cfg,
             run_diff,
+            start_mcp_server,
+            get_mcp_status,
+            stop_mcp_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

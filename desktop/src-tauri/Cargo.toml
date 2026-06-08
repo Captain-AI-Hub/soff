@@ -21,4 +21,7 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 similar = "2"
 libloading = "0.8"
-
+rmcp = "1.7.0"
+rmcp-actix-web = "0.12.12"
+actix-web = "4"
+schemars = "1.0"

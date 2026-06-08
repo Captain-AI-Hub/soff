@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
@@ -31,6 +31,12 @@ export interface DiffMatch {
   description: string;
 }
 
+interface McpStatus {
+  running: boolean;
+  port: number;
+  endpoint: string;
+}
+
 interface UnmatchedFunction {
   side: string;
   address: string;
@@ -47,7 +53,13 @@ export default function App() {
   const [page, setPage] = useState<Page>("analyze");
   const [soffPath, setSoffPath] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  const [mcpBusy, setMcpBusy] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    invoke<McpStatus>("get_mcp_status").then(setMcpStatus).catch(() => {});
+  }, []);
 
   const handleOpen = async () => {
     const path = await open({
@@ -72,6 +84,17 @@ export default function App() {
   const handleSelectMatch = (m: DiffMatch) => {
     setSelected(m);
     setPage("graph");
+  };
+
+  const handleStartMcp = async () => {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    try {
+      const status = await invoke<McpStatus>("start_mcp_server", { port: null });
+      setMcpStatus(status);
+    } finally {
+      setMcpBusy(false);
+    }
   };
 
   const loadFilteredMatches = async (type: string) => {
@@ -139,12 +162,20 @@ export default function App() {
 
   return (
     <div className="flex h-screen">
-      <Sidebar page={page} onPageChange={setPage} hasData={!!config} />
+      <Sidebar
+        page={page}
+        onPageChange={setPage}
+        hasData={!!config}
+        mcpRunning={!!mcpStatus?.running}
+        mcpEndpoint={mcpStatus?.endpoint || ""}
+        mcpBusy={mcpBusy}
+        onStartMcp={handleStartMcp}
+      />
       <div className="flex flex-col flex-1 min-w-0">
         {!config && page !== "soff" && page !== "diff" && <EmptyState onOpen={handleOpen} />}
 
         {page === "analyze" && config && (
-          <AnalyzeView soffPath={soffPath} config={config} />
+          <AnalyzeView soffPath={soffPath} config={config} onConfigChange={setConfig} />
         )}
 
         {page === "soff" && (

@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone)]
@@ -43,9 +43,7 @@ pub struct FunctionInfo {
 
 pub fn load_soff_config(path: &str) -> SqlResult<SoffConfig> {
     let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
-        "SELECT main_db, diff_db, version, date FROM config LIMIT 1",
-    )?;
+    let mut stmt = conn.prepare("SELECT main_db, diff_db, version, date FROM config LIMIT 1")?;
     let config = stmt.query_row([], |row| {
         Ok(SoffConfig {
             main_db: row.get(0)?,
@@ -56,21 +54,44 @@ pub fn load_soff_config(path: &str) -> SqlResult<SoffConfig> {
             total_unmatched: 0,
         })
     })?;
-    let total_matches: u32 = conn.query_row(
-        "SELECT count(*) FROM results", [], |r| r.get(0),
-    )?;
-    let total_unmatched: u32 = conn.query_row(
-        "SELECT count(*) FROM unmatched", [], |r| r.get(0),
-    )?;
-    Ok(SoffConfig { total_matches, total_unmatched, ..config })
+    let total_matches: u32 = conn.query_row("SELECT count(*) FROM results", [], |r| r.get(0))?;
+    let total_unmatched: u32 =
+        conn.query_row("SELECT count(*) FROM unmatched", [], |r| r.get(0))?;
+    Ok(SoffConfig {
+        total_matches,
+        total_unmatched,
+        ..config
+    })
 }
 
-pub fn query_matches(path: &str, match_type: &str, limit: u32, offset: u32) -> SqlResult<Vec<DiffMatch>> {
+pub fn update_soff_paths(path: &str, main_db: &str, diff_db: &str) -> SqlResult<SoffConfig> {
+    let conn = Connection::open(path)?;
+    let changed = conn.execute(
+        "UPDATE config SET main_db = ?1, diff_db = ?2 WHERE rowid = (SELECT rowid FROM config LIMIT 1)",
+        params![main_db, diff_db],
+    )?;
+    if changed == 0 {
+        conn.execute(
+            "INSERT INTO config (main_db, diff_db, version, date) VALUES (?1, ?2, '3.4', '')",
+            params![main_db, diff_db],
+        )?;
+    }
+    drop(conn);
+    load_soff_config(path)
+}
+
+pub fn query_matches(
+    path: &str,
+    match_type: &str,
+    limit: u32,
+    offset: u32,
+) -> SqlResult<Vec<DiffMatch>> {
     let conn = Connection::open(path)?;
     let sql = if match_type == "all" {
         format!(
             "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
-             FROM results ORDER BY ratio ASC, line LIMIT {} OFFSET {}", limit, offset
+             FROM results ORDER BY ratio ASC, line LIMIT {} OFFSET {}",
+            limit, offset
         )
     } else {
         format!(
@@ -96,14 +117,20 @@ pub fn query_matches(path: &str, match_type: &str, limit: u32, offset: u32) -> S
     rows.collect()
 }
 
-pub fn search_matches(path: &str, query: &str, match_type: &str, limit: u32) -> SqlResult<Vec<DiffMatch>> {
+pub fn search_matches(
+    path: &str,
+    query: &str,
+    match_type: &str,
+    limit: u32,
+) -> SqlResult<Vec<DiffMatch>> {
     let conn = Connection::open(path)?;
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
     let sql = if match_type == "all" {
         "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
          FROM results WHERE (name LIKE ?1 ESCAPE '\\' OR name2 LIKE ?1 ESCAPE '\\' \
          OR address LIKE ?1 ESCAPE '\\' OR address2 LIKE ?1 ESCAPE '\\') \
-         ORDER BY ratio ASC LIMIT ?2".to_string()
+         ORDER BY ratio ASC LIMIT ?2"
+            .to_string()
     } else {
         format!(
             "SELECT type, address, name, address2, name2, ratio, nodes1, nodes2, description \
@@ -134,7 +161,7 @@ pub fn search_unmatched(path: &str, query: &str, limit: u32) -> SqlResult<Vec<Un
     let mut stmt = conn.prepare(
         "SELECT type, address, name FROM unmatched \
          WHERE (name LIKE ?1 ESCAPE '\\' OR address LIKE ?1 ESCAPE '\\') \
-         ORDER BY line LIMIT ?2"
+         ORDER BY line LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
         Ok(UnmatchedFunction {
@@ -165,7 +192,8 @@ pub fn query_unmatched(path: &str, limit: u32, offset: u32) -> SqlResult<Vec<Unm
 pub fn query_function_column(db_path: &str, address: &str, column: &str) -> SqlResult<String> {
     let conn = Connection::open(db_path)?;
     let sql = format!(
-        "SELECT {} FROM functions WHERE address = ?1 LIMIT 1", column
+        "SELECT {} FROM functions WHERE address = ?1 LIMIT 1",
+        column
     );
     conn.query_row(&sql, [address], |row| row.get(0))
 }
@@ -206,15 +234,42 @@ pub struct AnalyzeStats {
 pub fn query_analyze_stats(path: &str) -> SqlResult<AnalyzeStats> {
     let conn = Connection::open(path)?;
 
-    let best: u32 = conn.query_row("SELECT count(*) FROM results WHERE type='best'", [], |r| r.get(0))?;
-    let partial: u32 = conn.query_row("SELECT count(*) FROM results WHERE type='partial'", [], |r| r.get(0))?;
-    let unreliable: u32 = conn.query_row("SELECT count(*) FROM results WHERE type='unreliable'", [], |r| r.get(0))?;
-    let unmatched_primary: u32 = conn.query_row("SELECT count(*) FROM unmatched WHERE type='primary'", [], |r| r.get(0))?;
-    let unmatched_secondary: u32 = conn.query_row("SELECT count(*) FROM unmatched WHERE type='secondary'", [], |r| r.get(0))?;
-    let avg_ratio: f64 = conn.query_row("SELECT coalesce(avg(ratio), 0) FROM results", [], |r| r.get(0))?;
+    let best: u32 = conn.query_row("SELECT count(*) FROM results WHERE type='best'", [], |r| {
+        r.get(0)
+    })?;
+    let partial: u32 = conn.query_row(
+        "SELECT count(*) FROM results WHERE type='partial'",
+        [],
+        |r| r.get(0),
+    )?;
+    let unreliable: u32 = conn.query_row(
+        "SELECT count(*) FROM results WHERE type='unreliable'",
+        [],
+        |r| r.get(0),
+    )?;
+    let unmatched_primary: u32 = conn.query_row(
+        "SELECT count(*) FROM unmatched WHERE type='primary'",
+        [],
+        |r| r.get(0),
+    )?;
+    let unmatched_secondary: u32 = conn.query_row(
+        "SELECT count(*) FROM unmatched WHERE type='secondary'",
+        [],
+        |r| r.get(0),
+    )?;
+    let avg_ratio: f64 =
+        conn.query_row("SELECT coalesce(avg(ratio), 0) FROM results", [], |r| {
+            r.get(0)
+        })?;
 
-    let total_nodes_primary: u64 = conn.query_row("SELECT coalesce(sum(nodes1), 0) FROM results", [], |r| r.get(0))?;
-    let total_nodes_secondary: u64 = conn.query_row("SELECT coalesce(sum(nodes2), 0) FROM results", [], |r| r.get(0))?;
+    let total_nodes_primary: u64 =
+        conn.query_row("SELECT coalesce(sum(nodes1), 0) FROM results", [], |r| {
+            r.get(0)
+        })?;
+    let total_nodes_secondary: u64 =
+        conn.query_row("SELECT coalesce(sum(nodes2), 0) FROM results", [], |r| {
+            r.get(0)
+        })?;
     // edges not stored in .soff, use nodes as proxy
     let total_edges_primary = total_nodes_primary;
     let total_edges_secondary = total_nodes_secondary;
@@ -230,10 +285,16 @@ pub fn query_analyze_stats(path: &str) -> SqlResult<AnalyzeStats> {
     }
 
     Ok(AnalyzeStats {
-        best, partial, unreliable,
-        unmatched_primary, unmatched_secondary,
-        avg_ratio, total_nodes_primary, total_nodes_secondary,
-        total_edges_primary, total_edges_secondary,
+        best,
+        partial,
+        unreliable,
+        unmatched_primary,
+        unmatched_secondary,
+        avg_ratio,
+        total_nodes_primary,
+        total_nodes_secondary,
+        total_edges_primary,
+        total_edges_secondary,
         ratio_distribution: dist,
     })
 }

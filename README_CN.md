@@ -161,6 +161,19 @@ xmake build -y
 cd desktop && bun install && bun run tauri build
 ```
 
+也可以使用一键构建脚本。脚本会先构建 Soff，把 `soff_ffi` 复制到 Tauri
+resources 目录，然后构建桌面应用：
+
+```bash
+# Windows
+pwsh scripts/build.ps1
+
+# macOS / Linux
+sh scripts/build.sh
+```
+
+添加 `--ida-plugin` 可同时构建 IDA 插件目标。
+
 ## 许可证
 
 MIT
