@@ -85,7 +85,7 @@ if (-not $SkipDesktop) {
         Invoke-Checked "bun" @("install") $DesktopDir
     }
     if ($DesktopBundles) {
-        Invoke-Checked "bun" @("run", "tauri", "build", "--", "--bundles", $DesktopBundles) $DesktopDir
+        Invoke-Checked "bun" @("run", "tauri", "build", "--bundles", $DesktopBundles) $DesktopDir
     }
     else {
         Invoke-Checked "bun" @("run", "tauri", "build") $DesktopDir

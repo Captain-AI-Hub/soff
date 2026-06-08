@@ -114,7 +114,7 @@ if [ "$SKIP_DESKTOP" -eq 0 ]; then
     run bun install
   fi
   if [ -n "$DESKTOP_BUNDLES" ]; then
-    run bun run tauri build -- --bundles "$DESKTOP_BUNDLES"
+    run bun run tauri build --bundles "$DESKTOP_BUNDLES"
   else
     run bun run tauri build
   fi
