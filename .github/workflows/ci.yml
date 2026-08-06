@@ -123,12 +123,12 @@ jobs:
           set -euo pipefail
           mkdir -p dist/native
           if [ -n "${{ matrix.plugin_name }}" ]; then
-            plugin=$(find build -name "${{ matrix.plugin_name }}" -print -quit)
+            plugin=$(find build -type f -name "${{ matrix.plugin_name }}" -print -quit)
             test -n "$plugin"
             cp "$plugin" dist/native/
           fi
-          cli=$(find build -name "${{ matrix.cli_name }}" -print -quit)
-          ffi=$(find build -name "${{ matrix.ffi_name }}" -print -quit)
+          cli=$(find build -type f -name "${{ matrix.cli_name }}" -print -quit)
+          ffi=$(find build -type f -name "${{ matrix.ffi_name }}" -print -quit)
           test -n "$cli"
           test -n "$ffi"
           cp "$cli" dist/native/
