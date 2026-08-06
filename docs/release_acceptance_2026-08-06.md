@@ -105,7 +105,7 @@ tests/fixtures/data/m6_pair_a_nullfix.sqlite
 tests/fixtures/data/m6_pair_b_nullfix.sqlite
 ```
 
-数据库总大小约 2.21 MiB，fixture 校准已加入 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml`。可复现命令：
+数据库总大小约 2.21 MiB，fixture 校准已加入合并后的 `.github/workflows/ci.yml`。可复现命令：
 
 ```powershell
 xmake run soff_cli check-m5-fixture `
