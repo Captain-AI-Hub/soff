@@ -31,6 +31,10 @@ build/
 *.soff
 *.crash
 
+# Versioned real-export calibration fixtures
+!tests/fixtures/data/
+!tests/fixtures/data/*.sqlite
+
 # IDE
 .vs/
 .vscode/
