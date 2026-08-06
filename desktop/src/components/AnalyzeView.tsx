@@ -9,6 +9,8 @@ interface AnalyzeStats {
   unreliable: number;
   unmatched_primary: number;
   unmatched_secondary: number;
+  primary_functions: number;
+  secondary_functions: number;
   avg_ratio: number;
   total_nodes_primary: number;
   total_nodes_secondary: number;
@@ -57,7 +59,16 @@ export function AnalyzeView({
   const [diffDb, setDiffDb] = useState(config.diff_db);
   const [savingPaths, setSavingPaths] = useState(false);
   const [pathError, setPathError] = useState("");
-  useEffect(() => { invoke<AnalyzeStats>("get_analyze_stats", { path: soffPath }).then(setStats); }, [soffPath]);
+  const [statsError, setStatsError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setStats(null);
+    setStatsError("");
+    invoke<AnalyzeStats>("get_analyze_stats", { path: soffPath })
+      .then((next) => { if (!cancelled) setStats(next); })
+      .catch((error) => { if (!cancelled) setStatsError(String(error)); });
+    return () => { cancelled = true; };
+  }, [soffPath, config.main_db, config.diff_db]);
   useEffect(() => {
     setMainDb(config.main_db);
     setDiffDb(config.diff_db);
@@ -91,11 +102,12 @@ export function AnalyzeView({
     }
   };
 
+  if (statsError) return <div className="flex-1 flex items-center justify-center p-6 text-center text-xs font-mono text-red-400">{statsError}</div>;
   if (!stats) return <div className="flex-1 flex items-center justify-center"><div className="animate-glow w-2 h-2 rounded-full bg-[var(--accent)]" /></div>;
 
   const totalMatched = stats.best + stats.partial + stats.unreliable;
-  const totalFunctions = totalMatched + stats.unmatched_primary + stats.unmatched_secondary;
-  const matchRate = totalFunctions > 0 ? totalMatched / totalFunctions : 0;
+  const maximumFunctions = Math.max(stats.primary_functions, stats.secondary_functions);
+  const matchRate = maximumFunctions > 0 ? totalMatched / maximumFunctions : 0;
 
   return (
     <div className="flex-1 flex flex-col overflow-auto p-5 gap-5 animate-fade-in">
@@ -146,7 +158,7 @@ export function AnalyzeView({
              style={{ background: "linear-gradient(145deg, var(--bg-surface), var(--bg-secondary))", boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05)" }}>
           <Donut3D value={matchRate} color="#9ece6a" size={150} />
           <span className="text-sm text-[var(--text-secondary)] mt-3">Match Rate</span>
-          <span className="text-[11px] text-[var(--text-muted)]">{totalMatched} / {totalFunctions}</span>
+          <span className="text-[11px] text-[var(--text-muted)]">{totalMatched} / {maximumFunctions}</span>
         </div>
         <div className="flex-1 grid grid-cols-3 grid-rows-2 gap-3 min-h-0">
           <MetricCard label="Best" value={stats.best} color="#9ece6a" icon={"✓"} />
@@ -165,7 +177,7 @@ export function AnalyzeView({
       </div>
       <div className="grid grid-cols-2 gap-4 shrink-0">
         <CompareCard label="Basic Blocks" left={stats.total_nodes_primary} right={stats.total_nodes_secondary} />
-        <CompareCard label="Total Functions" left={totalMatched + stats.unmatched_primary} right={totalMatched + stats.unmatched_secondary} />
+        <CompareCard label="Total Functions" left={stats.primary_functions} right={stats.secondary_functions} />
       </div>
     </div>
   );
@@ -233,7 +245,6 @@ function McpPanel({
           className="h-8 px-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent)]"
         >
           <option value="127.0.0.1">127.0.0.1</option>
-          <option value="0.0.0.0">0.0.0.0</option>
           <option value="::1">::1</option>
         </select>
 

@@ -21,6 +21,9 @@ struct BasicBlockMatchResult
     std::vector<BasicBlockMatch> matches;
     std::size_t primary_blocks = 0;
     std::size_t secondary_blocks = 0;
+    std::size_t primary_edges = 0;
+    std::size_t secondary_edges = 0;
+    std::size_t preserved_edges = 0;
 
     double similarity() const;
 };
@@ -39,10 +42,17 @@ struct BasicBlockInfo
     bool is_exit = false;
 };
 
+enum class BasicBlockKind
+{
+    native,
+    microcode,
+};
+
 BasicBlockMatchResult match_basic_blocks(
     db::Database& database,
     Address primary_function,
-    Address secondary_function);
+    Address secondary_function,
+    BasicBlockKind kind = BasicBlockKind::native);
 
 double structural_similarity(const BasicBlockMatchResult& bb_result);
 

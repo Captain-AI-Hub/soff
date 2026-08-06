@@ -14,8 +14,10 @@ class ThreadPool {
 public:
     explicit ThreadPool(unsigned int threads = 0)
     {
-        const auto count = threads > 0 ? threads
-            : std::max(1u, std::thread::hardware_concurrency() - 1);
+        const auto hardware_threads = std::thread::hardware_concurrency();
+        const auto count = threads > 0
+            ? threads
+            : (hardware_threads > 1 ? hardware_threads - 1 : 1);
         for (unsigned int i = 0; i < count; ++i) {
             workers_.emplace_back([this] { worker_loop(); });
         }

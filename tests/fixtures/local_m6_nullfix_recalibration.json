@@ -1,0 +1,55 @@
+{
+  "name": "local_m6_nullfix_recalibration",
+  "date": "2026-08-06",
+  "source": "build/m6_pair_a_nullfix.sqlite + build/m6_pair_b_nullfix.sqlite",
+  "main_db": "tests/fixtures/data/m6_pair_a_nullfix.sqlite",
+  "diff_db": "tests/fixtures/data/m6_pair_b_nullfix.sqlite",
+  "result_db": "build/m6_pair_local_fixture.soff",
+  "exports": {
+    "primary": {
+      "total_functions": 96,
+      "exported_functions": 95,
+      "skipped_functions": 1,
+      "instructions": 1826,
+      "basic_blocks": 460,
+      "bb_relations": 571,
+      "bb_instructions": 1826,
+      "function_bblocks": 460,
+      "callgraph": 139,
+      "constants": 214
+    },
+    "secondary": {
+      "total_functions": 96,
+      "exported_functions": 95,
+      "skipped_functions": 1,
+      "instructions": 1844,
+      "basic_blocks": 465,
+      "bb_relations": 578,
+      "bb_instructions": 1844,
+      "function_bblocks": 465,
+      "callgraph": 139,
+      "constants": 219
+    }
+  },
+  "diff_summary": {
+    "heuristics": 0,
+    "same_processor": true,
+    "candidates": 0,
+    "accepted": 0,
+    "multimatches": 0,
+    "best": 87,
+    "partial": 6,
+    "unreliable": 0,
+    "result_multimatch": 0,
+    "unmatched_primary": 2,
+    "unmatched_secondary": 2,
+    "row_limited": 0,
+    "timed_out": 0,
+    "cancelled": 0
+  },
+  "notes": [
+    "This is a reproducible local calibration fixture built from the checked-out workspace build artifacts.",
+    "It is not a substitute for the historical external M5 fixture referenced by the other calibration files.",
+    "The expected result intentionally records the current algorithm output and is useful for regression detection, not historical parity claims."
+  ]
+}

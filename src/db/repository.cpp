@@ -1,5 +1,6 @@
 #include "soff/db/repository.hpp"
 
+#include "soff/db/atomic_writer.hpp"
 #include "soff/db/schema.hpp"
 
 #include <charconv>
@@ -550,10 +551,16 @@ void insert_function_rows(
 
 bool SnapshotRepository::save(const ProgramSnapshot& snapshot, const std::filesystem::path& path) const
 {
-    begin_incremental_save(snapshot, path, true);
-    append_functions(snapshot.functions, path);
-    replace_program_data(snapshot.program_data, path);
-    finalize_incremental_save(path);
+    db::AtomicFileWriter writer(path);
+    const auto& temporary_path = writer.temporary_path();
+    begin_incremental_save(snapshot, temporary_path, false);
+    append_functions(snapshot.functions, temporary_path);
+    replace_program_data(snapshot.program_data, temporary_path);
+    update_callgraph_primes(snapshot.callgraph_primes, snapshot.callgraph_all_primes, temporary_path);
+    save_compilation_units(temporary_path);
+    finalize_incremental_save(temporary_path);
+    db::checkpoint_and_validate_sqlite(temporary_path);
+    writer.commit();
     return true;
 }
 
@@ -659,51 +666,67 @@ void SnapshotRepository::save_compilation_units(const std::filesystem::path& pat
     db::Database database;
     database.open(path);
 
-    const auto rows = database.query_rows(
+    const auto source_rows = database.query_rows(
         "select distinct source_file from functions "
         "where source_file is not null and source_file != '' "
         "order by source_file");
 
-    if (rows.empty()) return;
-
-    database.execute("delete from compilation_units");
+    db::Transaction transaction(database);
     database.execute("delete from compilation_unit_functions");
+    database.execute("delete from compilation_units");
 
-    int cu_id = 1;
-    for (const auto& row : rows) {
-        if (row.empty() || row[0].empty()) continue;
-        const auto& name = row[0];
+    auto function_statement = database.prepare(
+        "select id, address from functions where source_file = ? order by id");
+    auto unit_statement = database.prepare(
+        "insert into compilation_units (name, functions, start_ea, end_ea) values (?, ?, ?, ?)");
+    auto relation_statement = database.prepare(
+        "insert into compilation_unit_functions (cu_id, func_id) values (?, ?)");
 
-        const auto func_rows = database.query_rows(
-            "select address, min(address), max(address) from functions "
-            "where source_file = '" + name + "' "
-            "group by source_file");
-        if (func_rows.empty()) continue;
-
-        std::int64_t start_ea = 0, end_ea = 0;
-        if (func_rows.front().size() >= 3) {
-            try { start_ea = std::stoll(func_rows.front()[1]); } catch (...) {}
-            try { end_ea = std::stoll(func_rows.front()[2]); } catch (...) {}
+    for (const auto& source_row : source_rows) {
+        if (source_row.empty() || source_row[0].empty()) {
+            continue;
         }
 
-        database.execute(
-            "insert into compilation_units (id, name, start_ea, end_ea, "
-            "module_name, is_named, functions_count) values ("
-            + std::to_string(cu_id) + ", '" + name + "', "
-            + std::to_string(start_ea) + ", " + std::to_string(end_ea) + ", "
-            "'" + name + "', 1, "
-            "(select count(*) from functions where source_file = '" + name + "'))");
+        const auto& name = source_row[0];
+        function_statement.bind(1, name);
 
-        const auto funcs = database.query_rows(
-            "select address from functions where source_file = '" + name + "'");
-        for (const auto& f : funcs) {
-            if (f.empty()) continue;
-            database.execute(
-                "insert into compilation_unit_functions (cu_id, func_id, address) values ("
-                + std::to_string(cu_id) + ", " + f[0] + ", " + f[0] + ")");
+        std::vector<std::string> function_ids;
+        Address start_ea = 0;
+        Address end_ea = 0;
+        while (function_statement.step()) {
+            const auto function_id = function_statement.column_text(0);
+            const auto address = parse_address(function_statement.column_text(1));
+            function_ids.push_back(function_id);
+            if (start_ea == 0 || address < start_ea) {
+                start_ea = address;
+            }
+            if (address > end_ea) {
+                end_ea = address;
+            }
         }
-        ++cu_id;
+        function_statement.reset();
+
+        if (function_ids.empty()) {
+            continue;
+        }
+
+        bind_and_step(unit_statement, {
+            name,
+            std::to_string(function_ids.size()),
+            address_to_text(start_ea),
+            address_to_text(end_ea),
+        });
+        const auto compilation_unit_id = database.query_int("select last_insert_rowid()");
+
+        for (const auto& function_id : function_ids) {
+            bind_and_step(relation_statement, {
+                std::to_string(compilation_unit_id),
+                function_id,
+            });
+        }
     }
+
+    transaction.commit();
 }
 
 ProgramSnapshot SnapshotRepository::load(const std::filesystem::path& path) const

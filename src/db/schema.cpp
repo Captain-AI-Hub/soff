@@ -120,7 +120,8 @@ const SchemaDefinition& diaphora_compatible_schema()
             R"sql(create table if not exists compilation_unit_functions (
                 id integer primary key,
                 cu_id integer not null references compilation_units(id) on delete cascade,
-                func_id integer not null references functions(id) on delete cascade))sql",
+                func_id integer not null references functions(id) on delete cascade,
+                unique(cu_id, func_id)))sql",
         },
         {
             {"functions", "bytes_hash"},

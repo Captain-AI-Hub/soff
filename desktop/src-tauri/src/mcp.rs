@@ -1,3 +1,4 @@
+use crate::db::{open_read_only, resolve_db_path};
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::{
@@ -11,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::{
     net::TcpListener,
-    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -233,7 +233,8 @@ pub async fn start_mcp_server(
             .wrap(middleware::NormalizePath::trim())
             .wrap(
                 middleware::DefaultHeaders::new()
-                    .add(("Access-Control-Allow-Origin", "*"))
+                    .add(("Access-Control-Allow-Origin", "http://localhost:1420"))
+                    .add(("Vary", "Origin"))
                     .add(("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"))
                     .add((
                         "Access-Control-Allow-Headers",
@@ -303,10 +304,10 @@ fn mcp_status_from_state(state: &tauri::State<'_, McpServerState>) -> Option<Mcp
 }
 
 fn validate_bind_address(bind_address: &str) -> Result<(), String> {
-    if matches!(bind_address, "127.0.0.1" | "0.0.0.0" | "::1") {
+    if matches!(bind_address, "127.0.0.1" | "::1") {
         return Ok(());
     }
-    Err("bind_address must be 127.0.0.1, 0.0.0.0, or ::1".to_string())
+    Err("bind_address must be 127.0.0.1 or ::1".to_string())
 }
 
 fn socket_address(bind_address: &str, port: u16) -> String {
@@ -334,8 +335,14 @@ async fn health() -> HttpResponse {
 }
 
 fn query_diff_results(request: &DiffResultsRequest) -> SqlResult<DiffResultsResponse> {
-    let conn = Connection::open(&request.result_path)?;
-    let (main_db, diff_db) = load_paths(&conn)?;
+    let conn = open_read_only(&request.result_path)?;
+    let (stored_main_db, stored_diff_db) = load_paths(&conn)?;
+    let main_db = resolve_db_path(&request.result_path, &stored_main_db)
+        .to_string_lossy()
+        .into_owned();
+    let diff_db = resolve_db_path(&request.result_path, &stored_diff_db)
+        .to_string_lossy()
+        .into_owned();
     let match_type = request.match_type.as_deref().unwrap_or("all");
     let limit = request.limit.unwrap_or(100).min(1000);
     let offset = request.offset.unwrap_or(0);
@@ -380,7 +387,7 @@ fn query_diff_results(request: &DiffResultsRequest) -> SqlResult<DiffResultsResp
 }
 
 fn query_unmatched(request: &UnmatchedRequest) -> SqlResult<UnmatchedResponse> {
-    let conn = Connection::open(&request.result_path)?;
+    let conn = open_read_only(&request.result_path)?;
     let side = request.side.as_deref().unwrap_or("all");
     let limit = request.limit.unwrap_or(100).min(1000);
     let offset = request.offset.unwrap_or(0);
@@ -421,7 +428,7 @@ fn query_function_diff(
     request: &FunctionDiffRequest,
     column: &str,
 ) -> SqlResult<FunctionDiffResponse> {
-    let conn = Connection::open(&request.result_path)?;
+    let conn = open_read_only(&request.result_path)?;
     let (main_db, diff_db) = load_paths(&conn)?;
     let main_db = resolve_db_path(&request.result_path, &main_db);
     let diff_db = resolve_db_path(&request.result_path, &diff_db);
@@ -440,17 +447,6 @@ fn query_function_diff(
         secondary_addr,
         lines: unified_diff_lines(&left, &right),
     })
-}
-
-fn resolve_db_path(result_path: &str, db_path: &str) -> PathBuf {
-    let path = Path::new(db_path);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    Path::new(result_path)
-        .parent()
-        .map(|parent| parent.join(path))
-        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn load_paths(conn: &Connection) -> SqlResult<(String, String)> {
@@ -482,7 +478,7 @@ fn read_unmatched_item(row: &rusqlite::Row<'_>) -> SqlResult<UnmatchedItem> {
 }
 
 fn query_function_column(db_path: &str, address: &str, column: &str) -> SqlResult<Option<String>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_read_only(db_path)?;
     let sql = format!("SELECT {column} FROM functions WHERE address = ?1 LIMIT 1");
     conn.query_row(&sql, [address], |row| row.get(0)).optional()
 }

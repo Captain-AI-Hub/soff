@@ -26,6 +26,11 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
+
+namespace soff::diff {
+void resolve_multimatches_for_testing(std::vector<soff::db::ResultMatch>& matches);
+}
 
 namespace {
 
@@ -708,6 +713,63 @@ int main(int argc, char** argv)
     assert(exact_result_summary.unmatched_primary >= 1);
     assert(exact_result_summary.unmatched_secondary >= 1);
 
+    {
+        std::vector<soff::db::ResultMatch> ambiguous_matches;
+        ambiguous_matches.push_back({
+            soff::db::ResultKind::partial,
+            0,
+            0x610000,
+            "ambiguous_a",
+            0x710000,
+            "ambiguous_target",
+            0.75,
+            3,
+            3,
+            "equal primary top",
+        });
+        ambiguous_matches.push_back({
+            soff::db::ResultKind::partial,
+            1,
+            0x610000,
+            "ambiguous_a",
+            0x720000,
+            "ambiguous_target_2",
+            0.75,
+            3,
+            3,
+            "equal primary top",
+        });
+        ambiguous_matches.push_back({
+            soff::db::ResultKind::partial,
+            2,
+            0x620000,
+            "ambiguous_b",
+            0x730000,
+            "lower_secondary",
+            0.40,
+            3,
+            3,
+            "lower secondary",
+        });
+        ambiguous_matches.push_back({
+            soff::db::ResultKind::partial,
+            3,
+            0x630000,
+            "ambiguous_c",
+            0x730000,
+            "higher_secondary",
+            0.60,
+            3,
+            3,
+            "higher secondary",
+        });
+        soff::diff::resolve_multimatches_for_testing(ambiguous_matches);
+        assert(ambiguous_matches[0].kind == soff::db::ResultKind::multimatch);
+        assert(ambiguous_matches[1].kind == soff::db::ResultKind::multimatch);
+        assert(ambiguous_matches[2].kind == soff::db::ResultKind::multimatch);
+        assert(ambiguous_matches[3].kind == soff::db::ResultKind::partial);
+    }
+
     const auto all_result_path = std::filesystem::absolute(std::filesystem::path("build") / "soff_all_session.soff");
     const auto all_summary = soff::diff::DiffSession{}.run_all(db_path, db_path, all_result_path);
     assert(all_summary.same_processor);
@@ -842,6 +904,74 @@ int main(int argc, char** argv)
     }
     std::cout << "propagation: find_same_name test passed\n";
 
+    // M10: Related-constants propagation must treat constants.func_id as
+    // functions.id, not as the function address.
+    {
+        soff::ProgramSnapshot related_primary;
+        related_primary.architecture = "metapc";
+        related_primary.program_data.push_back({"export.total_functions", "integer", "2"});
+        related_primary.program_data.push_back({"export.exported_functions", "integer", "2"});
+        related_primary.program_data.push_back({"export.skipped_functions", "integer", "0"});
+
+        soff::FunctionFeature seed_primary;
+        seed_primary.address = 0x710000;
+        seed_primary.name = "seed";
+        seed_primary.node_count = 3;
+        seed_primary.instruction_count = 3;
+        seed_primary.constants.push_back("0xfeed");
+        related_primary.functions.push_back(seed_primary);
+
+        soff::FunctionFeature target_primary;
+        target_primary.address = 0x720000;
+        target_primary.name = "target_by_constant";
+        target_primary.node_count = 4;
+        target_primary.instruction_count = 4;
+        target_primary.constants.push_back("0xfeed");
+        related_primary.functions.push_back(target_primary);
+
+        auto related_secondary = related_primary;
+        related_secondary.functions[0].address = 0x810000;
+        related_secondary.functions[1].address = 0x820000;
+
+        const auto related_primary_path = std::filesystem::absolute(
+            std::filesystem::path("build") / "soff_related_constants_primary.sqlite");
+        const auto related_secondary_path = std::filesystem::absolute(
+            std::filesystem::path("build") / "soff_related_constants_secondary.sqlite");
+        assert(repository.save(related_primary, related_primary_path));
+        assert(repository.save(related_secondary, related_secondary_path));
+
+        soff::db::Database related_db;
+        related_db.open(related_primary_path);
+        repository.attach_diff(related_db, related_secondary_path);
+
+        std::vector<soff::db::ResultMatch> related_matches;
+        related_matches.push_back({
+            soff::db::ResultKind::best,
+            0,
+            0x710000,
+            "seed",
+            0x810000,
+            "seed",
+            1.0,
+            3,
+            3,
+            "seed",
+        });
+        boost::unordered_flat_set<soff::Address> related_primary_seen{0x710000};
+        boost::unordered_flat_set<soff::Address> related_secondary_seen{0x810000};
+        const auto related_count = soff::diff::find_related_constants(
+            related_db,
+            related_matches,
+            related_primary_seen,
+            related_secondary_seen,
+            0.8);
+        assert(related_count == 1);
+        assert(related_matches.back().primary == 0x720000);
+        assert(related_matches.back().secondary == 0x820000);
+        assert(related_matches.back().description == "Related constants");
+    }
+    std::cout << "propagation: related constants test passed\n";
+
     // M10: DiffSession with propagation enabled (smoke DB has 1 function,
     // SQL heuristics already match it, so propagation adds 0 - that's fine for correctness)
     {
@@ -898,6 +1028,18 @@ int main(int argc, char** argv)
               << " heuristics=" << heuristics.size() << '\n';
     std::cout << "db=" << db_path.string() << '\n';
     std::cout << "results=" << result_path.string() << '\n';
+
+    extern void test_repository_regressions();
+    test_repository_regressions();
+
+    extern void test_propagation_regressions();
+    test_propagation_regressions();
+
+    extern void test_matching_assignment();
+    test_matching_assignment();
+
+    extern void test_bb_matching_regressions();
+    test_bb_matching_regressions();
 
     extern void test_line_diff();
     test_line_diff();

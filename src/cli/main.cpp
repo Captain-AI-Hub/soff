@@ -7,6 +7,7 @@
 #include "soff/diff/session.hpp"
 
 #include <cstdint>
+#include <array>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -36,7 +37,7 @@ void print_usage()
         << "  soff_cli parity-report <manifest.json>\n"
         << "  soff_cli patch-diff <result.soff> <main.sqlite> <diff.sqlite> [--json]\n"
         << "  soff_cli ml-export <result.soff> <main.sqlite> <diff.sqlite> --out <file.csv|.json>\n"
-        << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>]\n";
+        << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>] [--root <fixture-root>]\n";
 }
 
 bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, soff::diff::DiffSessionOptions& options, bool& progress)
@@ -220,6 +221,35 @@ std::filesystem::path resolve_existing_relative_path(
         }
     }
     return path;
+}
+
+std::filesystem::path resolve_fixture_database(
+    const std::filesystem::path& path,
+    const std::filesystem::path& fixture_root,
+    const std::filesystem::path& executable_path)
+{
+    const auto resolved = resolve_existing_relative_path(path, executable_path);
+    if (std::filesystem::exists(resolved) || fixture_root.empty()) {
+        return resolved;
+    }
+
+    const auto root = resolve_existing_relative_path(fixture_root, executable_path);
+    if (!std::filesystem::exists(root)) {
+        return resolved;
+    }
+
+    const auto filename = path.filename();
+    const std::array<std::filesystem::path, 3> candidates = {
+        root / filename,
+        root / "test" / filename,
+        root / "tests" / filename,
+    };
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return resolved;
 }
 
 std::string unescape_json_string(std::string text)
@@ -591,18 +621,25 @@ void check_python_diaphora_baseline(
 
 int check_m5_fixture(int argc, char** argv)
 {
-    if (argc != 3 && argc != 5) {
+    if (argc < 3) {
         print_usage();
         return 2;
     }
     const std::filesystem::path fixture_path = resolve_existing_relative_path(argv[2], argv[0]);
     std::filesystem::path override_output;
-    if (argc == 5) {
-        if (std::string_view(argv[3]) != "--out") {
+    std::filesystem::path fixture_root;
+    for (int index = 3; index < argc; ++index) {
+        const std::string_view option(argv[index]);
+        if ((option == "--out" || option == "--root") && index + 1 < argc) {
+            if (option == "--out") {
+                override_output = argv[++index];
+            } else {
+                fixture_root = argv[++index];
+            }
+        } else {
             print_usage();
             return 2;
         }
-        override_output = argv[4];
     }
 
     const auto fixture_text = read_file_text(fixture_path);
@@ -610,10 +647,12 @@ int check_m5_fixture(int argc, char** argv)
     const auto primary = extract_object(exports, "primary");
     const auto secondary = extract_object(exports, "secondary");
     const auto diff_summary = extract_object(fixture_text, "diff_summary");
-    const std::filesystem::path main_db = extract_json_string(fixture_text, "main_db");
-    const std::filesystem::path diff_db = extract_json_string(fixture_text, "diff_db");
+    const std::filesystem::path main_db = resolve_fixture_database(
+        extract_json_string(fixture_text, "main_db"), fixture_root, argv[0]);
+    const std::filesystem::path diff_db = resolve_fixture_database(
+        extract_json_string(fixture_text, "diff_db"), fixture_root, argv[0]);
     const std::filesystem::path result_db = override_output.empty()
-        ? std::filesystem::path(extract_json_string(fixture_text, "result_db"))
+        ? resolve_fixture_database(extract_json_string(fixture_text, "result_db"), fixture_root, argv[0])
         : override_output;
 
     std::vector<std::string> failures;

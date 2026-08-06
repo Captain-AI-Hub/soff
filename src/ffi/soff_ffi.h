@@ -34,7 +34,10 @@ SOFF_API int soff_diff_run(
     int error_buf_size
 );
 
-/// Get version string.
+/// Get FFI API version.
+SOFF_API unsigned int soff_api_version(void);
+
+/// Get product version string.
 SOFF_API const char* soff_version(void);
 
 #ifdef __cplusplus

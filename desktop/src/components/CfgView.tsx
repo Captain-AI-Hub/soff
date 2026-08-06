@@ -10,16 +10,32 @@ export function CfgView({ match, mainDb, diffDb }: Props) {
   const [leftCfg, setLeftCfg] = useState<CfgData | null>(null);
   const [rightCfg, setRightCfg] = useState<CfgData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setError("");
     Promise.all([
       invoke<CfgData>("extract_cfg", { dbPath: mainDb, address: match.primary_addr }),
       invoke<CfgData>("extract_cfg", { dbPath: diffDb, address: match.secondary_addr }),
-    ]).then(([l, r]) => { setLeftCfg(l); setRightCfg(r); setLoading(false); });
-  }, [match, mainDb, diffDb]);
+    ])
+      .then(([left, right]) => {
+        if (cancelled) return;
+        setLeftCfg(left);
+        setRightCfg(right);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(String(reason));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [match.primary_addr, match.secondary_addr, mainDb, diffDb]);
 
   if (loading) return <div className="flex-1 flex items-center justify-center"><div className="animate-glow w-2 h-2 rounded-full bg-[var(--accent)]" /></div>;
+  if (error) return <div className="flex-1 flex items-center justify-center p-6 text-center text-xs font-mono text-red-400">{error}</div>;
 
   return (
     <div className="flex h-full">

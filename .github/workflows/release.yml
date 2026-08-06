@@ -1,7 +1,12 @@
-name: CI
+name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_name:
+        description: Tag and release name to create
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,8 +77,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -85,24 +88,10 @@ jobs:
         with:
           bun-version: 1.3.13
 
-      - name: Install desktop dependencies
-        working-directory: desktop
-        run: bun install --frozen-lockfile
+      - name: Check Bun
+        run: bun --version
 
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
-
-      - name: Run Rust clippy
-        run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
-
-      - name: Check frontend
-        working-directory: desktop
-        run: bun run build
-
-      - name: Build soff and desktop bundles
+      - name: Build soff and desktop
         run: ${{ matrix.build_command }}
 
       - name: Test native smoke
@@ -114,30 +103,90 @@ jobs:
       - name: Collect native artifacts
         shell: bash
         run: |
-          set -euo pipefail
           mkdir -p dist/native
           if [ -n "${{ matrix.plugin_name }}" ]; then
-            plugin=$(find build -name "${{ matrix.plugin_name }}" -print -quit)
-            test -n "$plugin"
-            cp "$plugin" dist/native/
+            find build -name "${{ matrix.plugin_name }}" -exec cp {} dist/native/ \;
           fi
-          cli=$(find build -name "${{ matrix.cli_name }}" -print -quit)
-          ffi=$(find build -name "${{ matrix.ffi_name }}" -print -quit)
-          test -n "$cli"
-          test -n "$ffi"
-          cp "$cli" dist/native/
-          cp "$ffi" dist/native/
+          find build -name "${{ matrix.cli_name }}" -exec cp {} dist/native/ \;
+          find build -name "${{ matrix.ffi_name }}" -exec cp {} dist/native/ \;
 
       - name: Upload native artifacts
         uses: actions/upload-artifact@v4
         with:
           name: soff-${{ matrix.artifact_suffix }}
           path: dist/native/
-          if-no-files-found: error
 
       - name: Upload desktop installer
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.artifact_suffix }}
           path: ${{ matrix.bundle_glob }}
-          if-no-files-found: error
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          copy_required() {
+            src="$1"
+            dst="$2"
+            if ! compgen -G "$src" > /dev/null; then
+              echo "Required release artifact is missing: $src" >&2
+              exit 1
+            fi
+            matches=( $src )
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "Expected exactly one release artifact for $src, found ${#matches[@]}" >&2
+              exit 1
+            fi
+            cp "${matches[0]}" "$dst"
+          }
+
+          copy_required "artifacts/soff-windows-x64/soff.dll" "release/soff-windows-x64.dll"
+          copy_required "artifacts/soff-windows-x64/soff_cli.exe" "release/soff_cli-windows-x64.exe"
+          copy_required "artifacts/soff-windows-x64/soff_ffi.dll" "release/soff_ffi-windows-x64.dll"
+
+          copy_required "artifacts/soff-linux-x64/soff.so" "release/soff-linux-x64.so"
+          copy_required "artifacts/soff-linux-x64/soff_cli" "release/soff_cli-linux-x64"
+          copy_required "artifacts/soff-linux-x64/libsoff_ffi.so" "release/libsoff_ffi-linux-x64.so"
+
+          copy_required "artifacts/soff-linux-arm64/soff_cli" "release/soff_cli-linux-arm64"
+          copy_required "artifacts/soff-linux-arm64/libsoff_ffi.so" "release/libsoff_ffi-linux-arm64.so"
+
+          copy_required "artifacts/soff-macos-arm64/soff.dylib" "release/soff-macos-arm64.dylib"
+          copy_required "artifacts/soff-macos-arm64/soff_cli" "release/soff_cli-macos-arm64"
+          copy_required "artifacts/soff-macos-arm64/libsoff_ffi.dylib" "release/libsoff_ffi-macos-arm64.dylib"
+
+          copy_required "artifacts/desktop-windows-x64/*.exe" "release/soff-desktop-windows-x64-setup.exe"
+          copy_required "artifacts/desktop-linux-x64/*.deb" "release/soff-desktop-linux-x64.deb"
+          copy_required "artifacts/desktop-linux-arm64/*.deb" "release/soff-desktop-linux-arm64.deb"
+          copy_required "artifacts/desktop-macos-arm64/*.dmg" "release/soff-desktop-macos-arm64.dmg"
+
+          find release -maxdepth 1 -type f -print | sort
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --generate-notes \
+            release/*

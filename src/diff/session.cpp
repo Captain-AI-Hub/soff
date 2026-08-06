@@ -23,6 +23,52 @@
 namespace soff::diff {
 namespace {
 
+std::filesystem::path normalized_path_for_comparison(const std::filesystem::path& path)
+{
+    std::error_code error;
+    auto absolute = std::filesystem::absolute(path, error);
+    if (error) {
+        absolute = path;
+    }
+    absolute = absolute.lexically_normal();
+
+    if (std::filesystem::exists(absolute, error) && !error) {
+        const auto canonical = std::filesystem::weakly_canonical(absolute, error);
+        if (!error) {
+            return canonical;
+        }
+    }
+
+    const auto parent = absolute.has_parent_path()
+        ? absolute.parent_path()
+        : std::filesystem::current_path(error);
+    const auto canonical_parent = std::filesystem::weakly_canonical(parent, error);
+    return error
+        ? absolute
+        : (canonical_parent / absolute.filename()).lexically_normal();
+}
+
+bool same_path(const std::filesystem::path& left, const std::filesystem::path& right)
+{
+    return normalized_path_for_comparison(left) == normalized_path_for_comparison(right);
+}
+
+void validate_output_path(
+    const std::filesystem::path& main_db,
+    const std::filesystem::path& diff_db,
+    const std::filesystem::path& output_db)
+{
+    if (output_db.empty()) {
+        throw std::invalid_argument("output database path must not be empty");
+    }
+    if (same_path(main_db, output_db)) {
+        throw std::invalid_argument("output database path must differ from the primary database path");
+    }
+    if (same_path(diff_db, output_db)) {
+        throw std::invalid_argument("output database path must differ from the secondary database path");
+    }
+}
+
 bool detect_same_processor(db::Database& database)
 {
     const auto primary_processor = database.query_text("select processor from program limit 1");
@@ -55,22 +101,33 @@ void cleanup_matches(
     boost::unordered_flat_set<Address>& matched_primary,
     boost::unordered_flat_set<Address>& matched_secondary)
 {
-    std::stable_sort(matches.begin(), matches.end(),
-        [](const auto& a, const auto& b) { return a.ratio > b.ratio; });
+    std::stable_sort(matches.begin(), matches.end(), [](const auto& a, const auto& b) {
+        if (a.ratio != b.ratio) return a.ratio > b.ratio;
+        if (a.kind != b.kind) {
+            return a.kind != db::ResultKind::multimatch
+                && b.kind == db::ResultKind::multimatch;
+        }
+        return false;
+    });
 
     boost::unordered_flat_set<std::string> seen_pairs;
     boost::unordered_flat_map<Address, double> best_ratio_primary;
     boost::unordered_flat_map<Address, double> best_ratio_secondary;
     std::vector<db::ResultMatch> cleaned;
+    std::vector<db::ResultMatch> multimatches;
     cleaned.reserve(matches.size());
+    multimatches.reserve(matches.size());
 
     for (auto& match : matches) {
-        if (match.kind == db::ResultKind::multimatch) continue;
-
         const auto pair_key = std::to_string(match.primary) + "-"
             + std::to_string(match.secondary);
         if (seen_pairs.find(pair_key) != seen_pairs.end()) continue;
         seen_pairs.insert(pair_key);
+
+        if (match.kind == db::ResultKind::multimatch) {
+            multimatches.push_back(std::move(match));
+            continue;
+        }
 
         const auto pit = best_ratio_primary.find(match.primary);
         if (pit != best_ratio_primary.end() && pit->second > match.ratio) continue;
@@ -90,6 +147,10 @@ void cleanup_matches(
         m.line = line++;
         matched_primary.insert(m.primary);
         matched_secondary.insert(m.secondary);
+    }
+    for (auto& m : multimatches) {
+        m.line = line++;
+        cleaned.push_back(std::move(m));
     }
     matches = std::move(cleaned);
 }
@@ -119,16 +180,24 @@ void resolve_multimatches(std::vector<db::ResultMatch>& matches)
 {
     boost::unordered_flat_map<Address, double> max_ratio_primary;
     boost::unordered_flat_map<Address, double> max_ratio_secondary;
+    boost::unordered_flat_map<Address, std::size_t> max_count_primary;
+    boost::unordered_flat_map<Address, std::size_t> max_count_secondary;
 
     for (const auto& m : matches) {
         if (m.kind == db::ResultKind::multimatch) continue;
         auto it = max_ratio_primary.find(m.primary);
         if (it == max_ratio_primary.end() || m.ratio > it->second) {
             max_ratio_primary[m.primary] = m.ratio;
+            max_count_primary[m.primary] = 1;
+        } else if (m.ratio == it->second) {
+            ++max_count_primary[m.primary];
         }
         auto it2 = max_ratio_secondary.find(m.secondary);
         if (it2 == max_ratio_secondary.end() || m.ratio > it2->second) {
             max_ratio_secondary[m.secondary] = m.ratio;
+            max_count_secondary[m.secondary] = 1;
+        } else if (m.ratio == it2->second) {
+            ++max_count_secondary[m.secondary];
         }
     }
 
@@ -136,8 +205,13 @@ void resolve_multimatches(std::vector<db::ResultMatch>& matches)
         if (m.kind == db::ResultKind::multimatch) continue;
         const auto pit = max_ratio_primary.find(m.primary);
         const auto sit = max_ratio_secondary.find(m.secondary);
-        if ((pit != max_ratio_primary.end() && m.ratio < pit->second)
-            || (sit != max_ratio_secondary.end() && m.ratio < sit->second)) {
+        const bool primary_conflict = pit != max_ratio_primary.end()
+            && (m.ratio < pit->second
+                || (m.ratio == pit->second && max_count_primary[m.primary] > 1));
+        const bool secondary_conflict = sit != max_ratio_secondary.end()
+            && (m.ratio < sit->second
+                || (m.ratio == sit->second && max_count_secondary[m.secondary] > 1));
+        if (primary_conflict || secondary_conflict) {
             m.kind = db::ResultKind::multimatch;
         }
     }
@@ -252,6 +326,11 @@ std::vector<db::HeuristicStat> convert_stats(const std::vector<SqlHeuristicStats
 
 } // namespace
 
+void resolve_multimatches_for_testing(std::vector<db::ResultMatch>& matches)
+{
+    resolve_multimatches(matches);
+}
+
 DiffSession::DiffSession(DiffSessionOptions options)
     : options_(std::move(options))
 {
@@ -345,6 +424,7 @@ DiffSessionSummary run_session(
     const std::filesystem::path& output_db,
     bool exact_only)
 {
+    validate_output_path(main_db, diff_db, output_db);
     if (!std::isfinite(options.fixed_point_min_delta_ratio) || options.fixed_point_min_delta_ratio < 0.0) {
         throw std::invalid_argument("fixed_point_min_delta_ratio must be finite and non-negative");
     }
@@ -510,7 +590,7 @@ DiffSessionSummary run_session(
         cleanup_matches(results.matches, matched_primary, matched_secondary);
     }
 
-    // Fixed-point iteration: heuristics → propagation → repeat until convergence
+    // Fixed-point iteration: heuristics -> propagation -> repeat until convergence
     PropagationStats propagation_stats;
     const int max_fixed_point_iterations = std::max(0, options.max_fixed_point_iterations);
     for (int fp_iter = 0; fp_iter < max_fixed_point_iterations && !exact_only && options.propagation.enabled; ++fp_iter) {
@@ -521,9 +601,16 @@ DiffSessionSummary run_session(
         prop_options.enable_slow = sql_options.enable_slow;
         prop_options.primary_cache = &primary_cache;
         prop_options.secondary_cache = &secondary_cache;
-        propagation_stats = run_propagation(
+        const auto round_stats = run_propagation(
             database, results.matches,
             matched_primary, matched_secondary, prop_options);
+        propagation_stats.same_name_matches += round_stats.same_name_matches;
+        propagation_stats.affine_matches += round_stats.affine_matches;
+        propagation_stats.diffing_matches += round_stats.diffing_matches;
+        propagation_stats.related_constants_matches += round_stats.related_constants_matches;
+        propagation_stats.compilation_unit_matches += round_stats.compilation_unit_matches;
+        propagation_stats.call_reference_matches += round_stats.call_reference_matches;
+        propagation_stats.iterations_run += round_stats.iterations_run;
         cleanup_matches(results.matches, matched_primary, matched_secondary);
 
         const auto matches_after = results.matches.size();
@@ -535,7 +622,7 @@ DiffSessionSummary run_session(
         const double delta_ratio = static_cast<double>(propagation_delta)
             / static_cast<double>(total_functions);
 
-        // Propagation found new matches — re-run heuristics with updated exclusions
+        // Propagation found new matches; re-run heuristics with updated exclusions
         if (fp_iter < max_fixed_point_iterations - 1 && !is_stripped_fast_path && !is_patchdiff_fast_path) {
             if (delta_ratio < options.fixed_point_min_delta_ratio) {
                 soff::perf::add_counter("diff.fixed_point.skip_small_delta");
@@ -591,10 +678,9 @@ DiffSessionSummary run_session(
             // Blend: 60% text ratio + 40% structural similarity
             const double blended = 0.6 * match.ratio + 0.4 * structural;
             match.ratio = blended;
-            // Promote to best if structural similarity is very high
-            if (blended >= 0.8 && structural >= 0.7 && match.kind == db::ResultKind::partial) {
-                match.kind = db::ResultKind::best;
-            }
+            // Structural evidence adjusts confidence but does not promote a partial
+            // match to best without independent exact evidence.
+            match.description += " [BB structural=" + std::to_string(structural) + "]";
         } catch (const std::bad_alloc&) {
             throw;
         } catch (...) {

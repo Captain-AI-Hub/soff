@@ -1,5 +1,6 @@
 #include "soff/db/result_repository.hpp"
 
+#include "soff/db/atomic_writer.hpp"
 #include "soff/db/database.hpp"
 
 #include <algorithm>
@@ -149,65 +150,67 @@ void ResultRepository::create_schema(const std::filesystem::path& path) const
 
 bool ResultRepository::save(const DiffResultSet& results, const std::filesystem::path& path) const
 {
-    if (std::filesystem::exists(path)) {
-        std::filesystem::remove(path);
+    AtomicFileWriter writer(path);
+    create_schema(writer.temporary_path());
+
+    {
+        Database database;
+        database.open(writer.temporary_path());
+        Transaction transaction(database);
+
+        const std::string date = results.date.empty() ? now_text() : results.date;
+        database.execute("insert into config values (?, ?, ?, ?)", {results.main_db, results.diff_db, results.version, date});
+
+        for (const auto& match : results.matches) {
+            database.execute(
+                "insert or ignore into results values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                {
+                    std::string(result_kind_name(match.kind)),
+                    std::to_string(match.line),
+                    address_to_text(match.primary),
+                    match.primary_name,
+                    address_to_text(match.secondary),
+                    match.secondary_name,
+                    std::to_string(match.ratio),
+                    std::to_string(match.primary_nodes),
+                    std::to_string(match.secondary_nodes),
+                    match.description,
+                });
+        }
+
+        for (const auto& unmatched : results.unmatched) {
+            database.execute(
+                "insert into unmatched values (?, ?, ?, ?)",
+                {
+                    std::string(unmatched_kind_name(unmatched.kind)),
+                    std::to_string(unmatched.line),
+                    address_to_text(unmatched.address),
+                    unmatched.name,
+                });
+        }
+
+        for (const auto& stats : results.heuristic_stats) {
+            database.execute(
+                "insert into heuristic_stats values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                {
+                    std::to_string(stats.line),
+                    stats.name,
+                    std::to_string(stats.candidates),
+                    std::to_string(stats.accepted),
+                    std::to_string(stats.rejected),
+                    std::to_string(stats.skipped),
+                    std::to_string(stats.multimatches),
+                    stats.row_limit_hit ? "1" : "0",
+                    stats.timeout_hit ? "1" : "0",
+                    stats.cancelled ? "1" : "0",
+                });
+        }
+
+        transaction.commit();
     }
 
-    create_schema(path);
-
-    Database database;
-    database.open(path);
-    Transaction transaction(database);
-
-    const std::string date = results.date.empty() ? now_text() : results.date;
-    database.execute("insert into config values (?, ?, ?, ?)", {results.main_db, results.diff_db, results.version, date});
-
-    for (const auto& match : results.matches) {
-        database.execute(
-            "insert or ignore into results values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            {
-                std::string(result_kind_name(match.kind)),
-                std::to_string(match.line),
-                address_to_text(match.primary),
-                match.primary_name,
-                address_to_text(match.secondary),
-                match.secondary_name,
-                std::to_string(match.ratio),
-                std::to_string(match.primary_nodes),
-                std::to_string(match.secondary_nodes),
-                match.description,
-            });
-    }
-
-    for (const auto& unmatched : results.unmatched) {
-        database.execute(
-            "insert into unmatched values (?, ?, ?, ?)",
-            {
-                std::string(unmatched_kind_name(unmatched.kind)),
-                std::to_string(unmatched.line),
-                address_to_text(unmatched.address),
-                unmatched.name,
-            });
-    }
-
-    for (const auto& stats : results.heuristic_stats) {
-        database.execute(
-            "insert into heuristic_stats values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            {
-                std::to_string(stats.line),
-                stats.name,
-                std::to_string(stats.candidates),
-                std::to_string(stats.accepted),
-                std::to_string(stats.rejected),
-                std::to_string(stats.skipped),
-                std::to_string(stats.multimatches),
-                stats.row_limit_hit ? "1" : "0",
-                stats.timeout_hit ? "1" : "0",
-                stats.cancelled ? "1" : "0",
-            });
-    }
-
-    transaction.commit();
+    checkpoint_and_validate_sqlite(writer.temporary_path());
+    writer.commit();
     return true;
 }
 

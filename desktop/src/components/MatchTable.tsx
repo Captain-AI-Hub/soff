@@ -5,6 +5,9 @@ interface Props {
   matches: DiffMatch[];
   selected: DiffMatch | null;
   onSelect: (m: DiffMatch) => void;
+  totalCount: number;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }
 
 const ROW_HEIGHT = 32;
@@ -25,7 +28,7 @@ function typeStyle(t: string) {
   }
 }
 
-export function MatchTable({ matches, selected, onSelect }: Props) {
+export function MatchTable({ matches, selected, onSelect, totalCount, loadingMore, onLoadMore }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(600);
@@ -39,8 +42,13 @@ export function MatchTable({ matches, selected, onSelect }: Props) {
   }, []);
 
   const onScroll = useCallback(() => {
-    if (containerRef.current) setScrollTop(containerRef.current.scrollTop);
-  }, []);
+    const el = containerRef.current;
+    if (!el) return;
+    setScrollTop(el.scrollTop);
+    if (!loadingMore && matches.length < totalCount && el.scrollTop + el.clientHeight >= el.scrollHeight - 640) {
+      onLoadMore();
+    }
+  }, [loadingMore, matches.length, onLoadMore, totalCount]);
 
   const totalHeight = matches.length * ROW_HEIGHT;
   const startIdx = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
@@ -94,6 +102,10 @@ export function MatchTable({ matches, selected, onSelect }: Props) {
         {matches.length === 0 && (
           <div className="flex items-center justify-center h-32 text-[var(--text-muted)] text-sm">No matches found</div>
         )}
+      </div>
+      <div className="shrink-0 h-7 px-3 flex items-center justify-between bg-[var(--bg-secondary)] border-t border-[var(--border)] text-[10px] text-[var(--text-muted)] font-mono">
+        <span>{matches.length.toLocaleString()} / {totalCount.toLocaleString()}</span>
+        <span>{loadingMore ? "Loading..." : matches.length < totalCount ? "Scroll for more" : "End"}</span>
       </div>
     </div>
   );

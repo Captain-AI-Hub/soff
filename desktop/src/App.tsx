@@ -45,7 +45,24 @@ interface UnmatchedFunction {
   name: string;
 }
 
+interface PagedResponse<T> {
+  total: number;
+  items: T[];
+}
+
+function matchKey(match: DiffMatch): string {
+  return [
+    match.match_type,
+    match.primary_addr,
+    match.secondary_addr,
+    match.primary_name,
+    match.secondary_name,
+  ].join("\u0000");
+}
+
 export type Page = "analyze" | "soff" | "graph" | "diff";
+
+const PAGE_SIZE = 2000;
 
 export default function App() {
   const [config, setConfig] = useState<SoffConfig | null>(null);
@@ -60,7 +77,12 @@ export default function App() {
   const [mcpBindAddress, setMcpBindAddress] = useState("127.0.0.1");
   const [mcpPort, setMcpPort] = useState(11339);
   const [mcpError, setMcpError] = useState("");
+  const [totalRows, setTotalRows] = useState(0);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [rowError, setRowError] = useState("");
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeq = useRef(0);
+  const loadingRowsRef = useRef(false);
 
   useEffect(() => {
     refreshMcpStatus();
@@ -77,15 +99,26 @@ export default function App() {
   };
 
   const loadSoffFile = async (path: string) => {
+    const requestId = ++requestSeq.current;
     setSoffPath(path);
-    const cfg = await invoke<SoffConfig>("open_soff", { path });
-    setConfig(cfg);
-    const data = await invoke<DiffMatch[]>("get_matches", {
-      path, matchType: "all", limit: 500000, offset: 0,
-    });
-    setMatches(data);
-    setSelected(null);
-    setPage("analyze");
+    setRowError("");
+    try {
+      const cfg = await invoke<SoffConfig>("open_soff", { path });
+      if (requestId !== requestSeq.current) return;
+      setConfig(cfg);
+      await loadRowsPage({ path, type: "all", query: "", offset: 0, append: false, requestId });
+      if (requestId !== requestSeq.current) return;
+      setSelected(null);
+      setPage("analyze");
+    } catch (error) {
+      if (requestId !== requestSeq.current) return;
+      loadingRowsRef.current = false;
+      setLoadingRows(false);
+      setConfig(null);
+      setMatches([]);
+      setTotalRows(0);
+      setRowError(String(error));
+    }
   };
 
   const handleSelectMatch = (m: DiffMatch) => {
@@ -136,65 +169,143 @@ export default function App() {
       .catch(() => {});
   };
 
+  const unmatchedToMatch = (u: UnmatchedFunction): DiffMatch => ({
+    match_type: u.side,
+    primary_addr: u.side === "primary" ? u.address : "",
+    primary_name: u.side === "primary" ? u.name : "",
+    secondary_addr: u.side === "secondary" ? u.address : "",
+    secondary_name: u.side === "secondary" ? u.name : "",
+    ratio: 0,
+    nodes1: 0,
+    nodes2: 0,
+    description: "Unmatched " + u.side,
+  });
+
+  const loadRowsPage = async ({
+    path,
+    type,
+    query,
+    offset,
+    append,
+    requestId,
+  }: {
+    path: string;
+    type: string;
+    query: string;
+    offset: number;
+    append: boolean;
+    requestId: number;
+  }) => {
+    if (append && loadingRowsRef.current) return;
+    loadingRowsRef.current = true;
+    setLoadingRows(true);
+    setRowError("");
+    try {
+      const trimmed = query.trim();
+      if (type === "unmatched") {
+        const command = trimmed ? "search_unmatched_page" : "get_unmatched_page";
+        const page = trimmed
+          ? await invoke<PagedResponse<UnmatchedFunction>>(command, {
+              path, query: trimmed, limit: PAGE_SIZE, offset,
+            })
+          : await invoke<PagedResponse<UnmatchedFunction>>(command, {
+              path, limit: PAGE_SIZE, offset,
+            });
+        if (requestId !== requestSeq.current) return;
+        const next = page.items.map(unmatchedToMatch);
+        setTotalRows(page.total);
+        setMatches((current) => {
+          if (!append) return next;
+          const seen = new Set(current.map(matchKey));
+          return [...current, ...next.filter((item) => {
+            const key = matchKey(item);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })];
+        });
+      } else {
+        const command = trimmed ? "search_matches_page" : "get_matches_page";
+        const page = trimmed
+          ? await invoke<PagedResponse<DiffMatch>>(command, {
+              path, query: trimmed, matchType: type, limit: PAGE_SIZE, offset,
+            })
+          : await invoke<PagedResponse<DiffMatch>>(command, {
+              path, matchType: type, limit: PAGE_SIZE, offset,
+            });
+        if (requestId !== requestSeq.current) return;
+        setTotalRows(page.total);
+        setMatches((current) => {
+          if (!append) return page.items;
+          const seen = new Set(current.map(matchKey));
+          const unique = page.items.filter((item) => {
+            const key = matchKey(item);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          return [...current, ...unique];
+        });
+      }
+    } catch (e) {
+      if (requestId === requestSeq.current) {
+        setRowError(String(e));
+        if (!append) {
+          setMatches([]);
+          setTotalRows(0);
+        }
+      }
+    } finally {
+      if (requestId === requestSeq.current) {
+        loadingRowsRef.current = false;
+        setLoadingRows(false);
+      }
+    }
+  };
+
   const loadFilteredMatches = async (type: string) => {
     setFilter(type);
     if (!soffPath) return;
-    if (type === "unmatched") {
-      const data = await invoke<UnmatchedFunction[]>("get_unmatched", {
-        path: soffPath, limit: 500000, offset: 0,
-      });
-      // Convert unmatched to DiffMatch format for display
-      setMatches(data.map((u) => ({
-        match_type: u.side,
-        primary_addr: u.side === "primary" ? u.address : "",
-        primary_name: u.side === "primary" ? u.name : "",
-        secondary_addr: u.side === "secondary" ? u.address : "",
-        secondary_name: u.side === "secondary" ? u.name : "",
-        ratio: 0,
-        nodes1: 0,
-        nodes2: 0,
-        description: "Unmatched " + u.side,
-      })));
-    } else {
-      const data = await invoke<DiffMatch[]>("get_matches", {
-        path: soffPath, matchType: type, limit: 500000, offset: 0,
-      });
-      setMatches(data);
-    }
+    setSelected(null);
+    const requestId = ++requestSeq.current;
+    await loadRowsPage({
+      path: soffPath,
+      type,
+      query: searchQuery,
+      offset: 0,
+      append: false,
+      requestId,
+    });
   };
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (!soffPath) return;
-    if (!query.trim()) {
-      // Empty search: reload current filter
-      searchTimer.current = setTimeout(() => loadFilteredMatches(filter), 100);
-      return;
-    }
     searchTimer.current = setTimeout(async () => {
-      if (filter === "unmatched") {
-        const data = await invoke<UnmatchedFunction[]>("search_unmatched", {
-          path: soffPath, query: query.trim(), limit: 10000,
-        });
-        setMatches(data.map((u) => ({
-          match_type: u.side,
-          primary_addr: u.side === "primary" ? u.address : "",
-          primary_name: u.side === "primary" ? u.name : "",
-          secondary_addr: u.side === "secondary" ? u.address : "",
-          secondary_name: u.side === "secondary" ? u.name : "",
-          ratio: 0,
-          nodes1: 0,
-          nodes2: 0,
-          description: "Unmatched " + u.side,
-        })));
-      } else {
-        const data = await invoke<DiffMatch[]>("search_matches", {
-          path: soffPath, query: query.trim(), matchType: filter, limit: 10000,
-        });
-        setMatches(data);
-      }
+      const requestId = ++requestSeq.current;
+      await loadRowsPage({
+        path: soffPath,
+        type: filter,
+        query,
+        offset: 0,
+        append: false,
+        requestId,
+      });
     }, 250);
+  };
+
+  const loadMoreRows = () => {
+    if (!soffPath || loadingRowsRef.current || matches.length >= totalRows) return;
+    const requestId = requestSeq.current;
+    void loadRowsPage({
+      path: soffPath,
+      type: filter,
+      query: searchQuery,
+      offset: matches.length,
+      append: true,
+      requestId,
+    });
   };
 
   const filtered = matches;
@@ -232,7 +343,16 @@ export default function App() {
             {config ? (
               <>
                 <Toolbar config={config} filter={filter} onFilter={loadFilteredMatches} searchQuery={searchQuery} onSearch={handleSearch} />
-                <MatchTable matches={filtered} selected={selected} onSelect={handleSelectMatch} />
+                {rowError && <div className="px-3 py-2 text-[11px] font-mono text-red-400 bg-[var(--bg-secondary)] border-b border-[var(--border)]">{rowError}</div>}
+                <MatchTable
+                  key={`${soffPath}:${filter}:${searchQuery}`}
+                  matches={filtered}
+                  selected={selected}
+                  onSelect={handleSelectMatch}
+                  totalCount={totalRows}
+                  loadingMore={loadingRows}
+                  onLoadMore={loadMoreRows}
+                />
               </>
             ) : (
               <EmptyState onOpen={handleOpen} />

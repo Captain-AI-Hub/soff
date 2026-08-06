@@ -33,6 +33,8 @@ struct PropagationStats
     std::size_t affine_matches = 0;
     std::size_t diffing_matches = 0;
     std::size_t related_constants_matches = 0;
+    std::size_t compilation_unit_matches = 0;
+    std::size_t call_reference_matches = 0;
     int iterations_run = 0;
 };
 

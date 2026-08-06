@@ -5,6 +5,7 @@
 #include "soff/diff/heuristics.hpp"
 #include "soff/diff/session.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -13,6 +14,45 @@
 #include <string_view>
 
 namespace {
+
+void write_error(char* buffer, int buffer_size, std::string_view message)
+{
+    if (buffer == nullptr || buffer_size <= 0) {
+        return;
+    }
+    const auto capacity = static_cast<std::size_t>(buffer_size);
+    const auto copy_size = std::min(message.size(), capacity - 1);
+    std::memcpy(buffer, message.data(), copy_size);
+    buffer[copy_size] = '\0';
+}
+
+std::string json_escape(std::string_view value)
+{
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const unsigned char ch : value) {
+        switch (ch) {
+        case '"': escaped += "\\\""; break;
+        case '\\': escaped += "\\\\"; break;
+        case '\b': escaped += "\\b"; break;
+        case '\f': escaped += "\\f"; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default:
+            if (ch < 0x20) {
+                static constexpr char hex[] = "0123456789abcdef";
+                escaped += "\\u00";
+                escaped.push_back(hex[(ch >> 4) & 0x0f]);
+                escaped.push_back(hex[ch & 0x0f]);
+            } else {
+                escaped.push_back(static_cast<char>(ch));
+            }
+            break;
+        }
+    }
+    return escaped;
+}
 
 struct FfiProgressHooks : soff::DiffHooks
 {
@@ -35,7 +75,7 @@ struct FfiProgressHooks : soff::DiffHooks
         out << "{\"phase\":\"heuristic\",\"index\":" << index
             << ",\"total\":" << total
             << ",\"matches\":" << matches
-            << ",\"name\":\"" << name << "\"}";
+            << ",\"name\":\"" << json_escape(name) << "\"}";
         emit(out.str());
         return std::string(sql);
     }
@@ -61,6 +101,19 @@ SOFF_API int soff_diff_run(
     char* error_buf,
     int error_buf_size)
 {
+    if (primary_db == nullptr || *primary_db == '\0') {
+        write_error(error_buf, error_buf_size, "primary database path is empty");
+        return 3;
+    }
+    if (secondary_db == nullptr || *secondary_db == '\0') {
+        write_error(error_buf, error_buf_size, "secondary database path is empty");
+        return 3;
+    }
+    if (output_path == nullptr || *output_path == '\0') {
+        write_error(error_buf, error_buf_size, "output database path is empty");
+        return 3;
+    }
+
     try {
         FfiProgressHooks hooks;
         hooks.callback = progress_cb;
@@ -107,18 +160,17 @@ SOFF_API int soff_diff_run(
         }
         return 0;
     } catch (const std::exception& e) {
-        if (error_buf && error_buf_size > 0) {
-            std::strncpy(error_buf, e.what(), static_cast<std::size_t>(error_buf_size - 1));
-            error_buf[error_buf_size - 1] = '\0';
-        }
+        write_error(error_buf, error_buf_size, e.what());
         return 1;
     } catch (...) {
-        if (error_buf && error_buf_size > 0) {
-            std::strncpy(error_buf, "unknown error", static_cast<std::size_t>(error_buf_size - 1));
-            error_buf[error_buf_size - 1] = '\0';
-        }
+        write_error(error_buf, error_buf_size, "unknown error");
         return 2;
     }
+}
+
+SOFF_API unsigned int soff_api_version(void)
+{
+    return 1U;
 }
 
 SOFF_API const char* soff_version(void)

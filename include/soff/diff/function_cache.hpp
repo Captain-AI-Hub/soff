@@ -7,6 +7,7 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace soff::diff {
 
@@ -14,6 +15,7 @@ struct CachedFunction
 {
     Address address = 0;
     std::string name;
+    std::string mangled_function;
     std::string clean_assembly;
     std::string clean_pseudo;
     std::string pseudocode_primes;
@@ -31,7 +33,8 @@ struct CachedFunction
 struct FunctionCache
 {
     boost::unordered_flat_map<Address, CachedFunction> by_address;
-    boost::unordered_flat_map<std::string, Address> by_name;
+    boost::unordered_flat_map<std::string, std::vector<Address>> by_name;
+    boost::unordered_flat_map<std::string, std::vector<Address>> by_mangled_name;
 };
 
 FunctionCache load_function_cache(db::Database& database, std::string_view schema_name);

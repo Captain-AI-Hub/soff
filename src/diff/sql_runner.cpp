@@ -4,6 +4,7 @@
 #include "soff/core/perf.hpp"
 #include "soff/core/thread_pool.hpp"
 #include "soff/diff/heuristics.hpp"
+#include "soff/diff/matching_assignment.hpp"
 #include "soff/diff/ratio.hpp"
 
 #include <charconv>
@@ -504,6 +505,35 @@ AppendOutcome append_match(
     return AppendOutcome::accepted;
 }
 
+
+AppendOutcome append_forced_multimatch(
+    SqlHeuristicRunResult& result,
+    const CandidateRow& candidate,
+    double ratio,
+    int& line,
+    boost::unordered_flat_set<std::string>& emitted_pairs)
+{
+    const auto pair_key = match_pair_key(candidate.primary, candidate.secondary);
+    if (emitted_pairs.find(pair_key) != emitted_pairs.end()) {
+        return AppendOutcome::skipped;
+    }
+
+    db::ResultMatch match;
+    match.kind = db::ResultKind::multimatch;
+    match.line = line++;
+    match.primary = candidate.primary;
+    match.primary_name = candidate.primary_name;
+    match.secondary = candidate.secondary;
+    match.secondary_name = candidate.secondary_name;
+    match.ratio = ratio;
+    match.primary_nodes = candidate.primary_nodes;
+    match.secondary_nodes = candidate.secondary_nodes;
+    match.description = candidate.description;
+    result.matches.push_back(std::move(match));
+    emitted_pairs.insert(pair_key);
+    return AppendOutcome::multimatch;
+}
+
 } // namespace
 
 std::string apply_postfix(std::string sql, std::string_view postfix)
@@ -672,38 +702,7 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             }
         }
 
-        // Phase 1.5: Disambiguation — when multiple candidates share the same
-        // primary or secondary address, keep only the highest-ratio candidate.
-        // This prevents greedy first-come-first-served from picking suboptimal matches.
-        {
-            boost::unordered_flat_set<Address> best_primary;
-            boost::unordered_flat_set<Address> best_secondary;
-            // Sort by ratio descending so we see the best candidate first
-            std::vector<std::size_t> order(scored.size());
-            std::iota(order.begin(), order.end(), 0);
-            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-                return scored[a].ratio > scored[b].ratio;
-            });
-            for (auto idx : order) {
-                auto& sc = scored[idx];
-                if (!sc.valid) {
-                    continue;
-                }
-                const auto p = sc.candidate.primary;
-                const auto s = sc.candidate.secondary;
-                const bool p_seen = best_primary.find(p) != best_primary.end();
-                const bool s_seen = best_secondary.find(s) != best_secondary.end();
-                if (p_seen || s_seen) {
-                    // A better candidate already claimed this address
-                    sc.valid = false;
-                    continue;
-                }
-                best_primary.insert(p);
-                best_secondary.insert(s);
-            }
-        }
-
-        // Phase 2: sequential deep_ratio_bonus + filtering
+        // Phase 2: complete all scoring before one-to-one disambiguation.
         for (auto& sc : scored) {
             if (!sc.valid) {
                 ++stats.rejected;
@@ -712,13 +711,13 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
             auto& candidate = sc.candidate;
             double ratio = sc.ratio;
 
-            // Relaxed ratio: matching high md_index -> accept as 1.0
             if (options.enable_relaxed_ratio
                 && candidate.md1 == candidate.md2 && candidate.md1 > 10.0) {
                 ratio = 1.0;
             }
 
-            if (heuristic.ratio_mode != RatioMode::no_false_positives && ratio < 1.0 && ratio >= minimum_ratio - 0.05) {
+            if (heuristic.ratio_mode != RatioMode::no_false_positives
+                && ratio < 1.0 && ratio >= minimum_ratio - 0.05) {
                 double bonus = 0.0;
                 {
                     soff::perf::ScopedTimer timer("ratio.deep_bonus");
@@ -727,11 +726,8 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
                 ratio = ratio + bonus < 1.0 ? ratio + bonus : 0.99;
             }
 
-            if (ratio < minimum_ratio) {
-                ++stats.rejected;
-                continue;
-            }
-            if (!std::isfinite(ratio)) {
+            if (ratio < minimum_ratio || !std::isfinite(ratio)) {
+                sc.valid = false;
                 ++stats.rejected;
                 continue;
             }
@@ -747,29 +743,94 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
                 context.primary_nodes = candidate.primary_nodes;
                 context.secondary_nodes = candidate.secondary_nodes;
                 const auto decision = options.hooks->on_match(context);
-                if (!decision.accept) {
+                if (!decision.accept || !std::isfinite(decision.adjusted_ratio)
+                    || decision.adjusted_ratio < minimum_ratio) {
+                    sc.valid = false;
                     ++stats.rejected;
                     continue;
                 }
                 ratio = decision.adjusted_ratio;
             }
+            sc.ratio = std::clamp(ratio, 0.0, 1.0);
+        }
 
+        std::vector<WeightedMatchCandidate> assignment_candidates;
+        std::vector<std::size_t> assignment_to_scored;
+        std::vector<std::size_t> direct_multimatches;
+        std::size_t eligible_candidates = 0;
+        for (std::size_t index = 0; index < scored.size(); ++index) {
+            const auto& sc = scored[index];
+            if (!sc.valid) continue;
+            ++eligible_candidates;
+            const bool primary_matched = matched_primary.find(sc.candidate.primary) != matched_primary.end();
+            const bool secondary_matched = matched_secondary.find(sc.candidate.secondary) != matched_secondary.end();
+            if (primary_matched && secondary_matched) {
+                ++stats.skipped;
+                continue;
+            }
+            if (primary_matched || secondary_matched) {
+                if (sc.ratio >= 1.0) {
+                    direct_multimatches.push_back(index);
+                } else {
+                    ++stats.skipped;
+                }
+                continue;
+            }
+            assignment_candidates.push_back({
+                sc.candidate.primary,
+                sc.candidate.secondary,
+                sc.ratio,
+            });
+            assignment_to_scored.push_back(index);
+        }
+
+        for (const auto index : direct_multimatches) {
+            const auto outcome = append_forced_multimatch(
+                result, scored[index].candidate, scored[index].ratio, line, emitted_pairs);
+            if (outcome == AppendOutcome::multimatch) ++stats.multimatches;
+            else ++stats.skipped;
+        }
+
+        const auto resolution = resolve_weighted_matches(assignment_candidates);
+        if (resolution.greedy_fallback_components != 0) {
+            soff::perf::add_counter(
+                "diff.assignment.greedy_fallback",
+                resolution.greedy_fallback_components);
+        }
+        boost::unordered_flat_set<std::size_t> emitted_assignment_indices;
+        for (const auto assignment_index : resolution.multimatches) {
+            const auto scored_index = assignment_to_scored[assignment_index];
+            emitted_assignment_indices.insert(assignment_index);
+            const auto outcome = append_forced_multimatch(
+                result,
+                scored[scored_index].candidate,
+                scored[scored_index].ratio,
+                line,
+                emitted_pairs);
+            if (outcome == AppendOutcome::multimatch) ++stats.multimatches;
+            else ++stats.skipped;
+        }
+        for (const auto assignment_index : resolution.selected) {
+            const auto scored_index = assignment_to_scored[assignment_index];
+            emitted_assignment_indices.insert(assignment_index);
             const auto outcome = append_match(
                 result,
-                candidate,
+                scored[scored_index].candidate,
                 heuristic,
-                ratio,
+                scored[scored_index].ratio,
                 line,
                 matched_primary,
                 matched_secondary,
                 emitted_pairs);
-            if (outcome == AppendOutcome::accepted) {
-                ++stats.accepted;
-            } else if (outcome == AppendOutcome::multimatch) {
-                ++stats.multimatches;
-            } else {
-                ++stats.skipped;
-            }
+            if (outcome == AppendOutcome::accepted) ++stats.accepted;
+            else if (outcome == AppendOutcome::multimatch) ++stats.multimatches;
+            else ++stats.skipped;
+        }
+
+        const auto resolved_count = emitted_assignment_indices.size()
+            + direct_multimatches.size();
+        if (eligible_candidates > resolved_count + stats.skipped) {
+            stats.rejected += eligible_candidates - resolved_count - stats.skipped;
         }
 
         result.stats.push_back(std::move(stats));
