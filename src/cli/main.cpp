@@ -1484,26 +1484,31 @@ int main(int argc, char** argv)
             if (const auto error = validate_export_database(path, "inspect"); !error.empty()) {
                 throw std::runtime_error(error);
             }
-            const auto snapshot = repository.load(path);
+            // Do NOT load the full snapshot here: for large exports (100k+
+            // functions) repository.load() pulls every instruction row into
+            // memory and takes minutes. The summary only needs aggregates.
             soff::db::Database database;
             database.open(path);
+            const auto architecture = database.query_text("select processor from program limit 1");
+            const auto program_data_rows = database.query_rows("select name, value, type from program_data order by id");
+            const auto function_count = database.query_int("select count(*) from functions");
             const auto find_program_data = [&](std::string_view name) {
-                for (const auto& item : snapshot.program_data) {
-                    if (item.name == name) {
-                        return item.value;
+                for (const auto& row : program_data_rows) {
+                    if (row.size() >= 2 && row[0] == name) {
+                        return row[1];
                     }
                 }
                 return std::string{};
             };
-            std::cout << "arch=" << snapshot.architecture
+            std::cout << "arch=" << architecture
                       << " version=" << database.query_text("select value from version limit 1")
                       << " tables=" << object_count(database, "table")
                       << " indexes=" << object_count(database, "index")
-                      << " program_data=" << snapshot.program_data.size()
+                      << " program_data=" << program_data_rows.size()
                       << " export_total=" << find_program_data("export.total_functions")
                       << " export_exported=" << find_program_data("export.exported_functions")
                       << " export_skipped=" << find_program_data("export.skipped_functions")
-                      << " functions=" << snapshot.functions.size()
+                      << " functions=" << function_count
                       << " instructions=" << table_count(database, "instructions")
                       << " basic_blocks=" << table_count(database, "basic_blocks")
                       << " bb_relations=" << table_count(database, "bb_relations")
@@ -1514,13 +1519,13 @@ int main(int argc, char** argv)
             if (inspect_options.show_summary_json) {
                 std::cout << "summary_json {"
                           << "\"type\":\"export\","
-                          << "\"arch\":\"" << json_escape(snapshot.architecture) << "\","
+                          << "\"arch\":\"" << json_escape(architecture) << "\","
                           << "\"version\":\"" << json_escape(database.query_text("select value from version limit 1")) << "\","
-                          << "\"program_data\":" << snapshot.program_data.size() << ","
+                          << "\"program_data\":" << program_data_rows.size() << ","
                           << "\"export_total\":\"" << json_escape(find_program_data("export.total_functions")) << "\","
                           << "\"export_exported\":\"" << json_escape(find_program_data("export.exported_functions")) << "\","
                           << "\"export_skipped\":\"" << json_escape(find_program_data("export.skipped_functions")) << "\","
-                          << "\"functions\":" << snapshot.functions.size() << ","
+                          << "\"functions\":" << function_count << ","
                           << "\"instructions\":" << table_count(database, "instructions") << ","
                           << "\"basic_blocks\":" << table_count(database, "basic_blocks") << ","
                           << "\"bb_relations\":" << table_count(database, "bb_relations") << ","
@@ -1531,11 +1536,14 @@ int main(int argc, char** argv)
                           << "}\n";
             }
             if (inspect_options.show_program_data) {
-                for (const auto& item : snapshot.program_data) {
+                for (const auto& row : program_data_rows) {
+                    if (row.size() < 3) {
+                        continue;
+                    }
                     std::cout << "program_data"
-                              << " name=" << item.name
-                              << " type=" << item.type
-                              << " value=" << item.value << '\n';
+                              << " name=" << row[0]
+                              << " type=" << row[2]
+                              << " value=" << row[1] << '\n';
                 }
             }
             if (inspect_options.show_field_stats) {
