@@ -7,8 +7,6 @@ interface Props {
   match: DiffMatch;
   mainDb: string;
   diffDb: string;
-  height: number;
-  onHeightChange: (h: number) => void;
 }
 
 interface DiffPair {
@@ -19,13 +17,29 @@ interface DiffPair {
 
 type ViewMode = "side-pseudo" | "side-asm" | "unified-pseudo" | "unified-asm" | "cfg";
 
-export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Props) {
+function headerRatioColor(ratio: number): string {
+  if (ratio >= 0.95) return "var(--green)";
+  if (ratio >= 0.7) return "var(--yellow)";
+  if (ratio >= 0.5) return "var(--orange)";
+  return "var(--red)";
+}
+
+function headerTypeBadge(t: string): string {
+  switch (t) {
+    case "best": return "bg-emerald-500/10 text-emerald-400 border-emerald-500/25";
+    case "partial": return "bg-amber-500/10 text-amber-400 border-amber-500/25";
+    case "multimatch": return "bg-violet-500/10 text-violet-400 border-violet-500/25";
+    default: return "bg-rose-500/10 text-rose-400 border-rose-500/25";
+  }
+}
+
+export function DiffViewer({ match, mainDb, diffDb }: Props) {
   const [mode, setMode] = useState<ViewMode>("side-pseudo");
   const [pairs, setPairs] = useState<DiffPair[]>([]);
   const [diffLines, setDiffLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,29 +70,59 @@ export function DiffViewer({ match, mainDb, diffDb, height, onHeightChange }: Pr
     return () => { cancelled = true; };
   }, [match, mode, mainDb, diffDb]);
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    dragRef.current = { startY: e.clientY, startH: height };
-    const onMove = (ev: MouseEvent) => {
-      if (!dragRef.current) return;
-      const delta = dragRef.current.startY - ev.clientY;
-      onHeightChange(Math.max(150, Math.min(window.innerHeight - 200, dragRef.current.startH + delta)));
-    };
-    const onUp = () => { dragRef.current = null; document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+  const copyAddresses = async () => {
+    try {
+      await navigator.clipboard.writeText(`${match.primary_addr} ${match.secondary_addr}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard may be unavailable in some webview contexts.
+    }
   };
 
   const isAsm = mode.includes("asm");
 
   return (
-    <div className="flex flex-col flex-1 min-h-0" style={height ? { height, flex: "none" } : undefined}>
-      {height > 0 && <div onMouseDown={handleMouseDown} className="h-1.5 cursor-row-resize bg-[var(--border)] hover:bg-[var(--accent)] transition-colors shrink-0" />}
-      <div className="flex items-center px-3 py-1.5 bg-[var(--bg-secondary)] border-b border-[var(--border)] shrink-0 gap-3">
-        <span className="font-mono text-[11px] text-[var(--text-primary)] truncate max-w-[180px]">{match.primary_name}</span>
-        <span className="text-[var(--text-muted)] text-[10px]">↔</span>
-        <span className="font-mono text-[11px] text-[var(--text-secondary)] truncate max-w-[180px]">{match.secondary_name}</span>
-        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-surface)] text-[var(--text-muted)]">{(match.ratio * 100).toFixed(0)}%</span>
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center px-3 py-2 bg-[var(--bg-secondary)]/90 border-b border-[var(--border)] shrink-0 gap-2.5">
+        <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded-md border ${headerTypeBadge(match.match_type)}`}>
+          {match.match_type}
+        </span>
+        <span className="font-mono text-[11px] text-[var(--text-primary)] truncate max-w-[220px]" title={match.primary_addr}>
+          {match.primary_name}
+        </span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-[var(--text-muted)] shrink-0">
+          <path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="font-mono text-[11px] text-[var(--text-secondary)] truncate max-w-[220px]" title={match.secondary_addr}>
+          {match.secondary_name}
+        </span>
+        <span
+          className="font-mono text-[10px] px-1.5 py-0.5 rounded-md border border-[var(--border)] bg-[var(--bg-primary)]"
+          style={{ color: headerRatioColor(match.ratio) }}
+        >
+          {(match.ratio * 100).toFixed(0)}%
+        </span>
+        <button
+          onClick={copyAddresses}
+          data-tip={copied ? "Copied!" : "Copy addresses"}
+          aria-label="Copy addresses"
+          className="w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-muted)]
+                     hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+        >
+          {copied ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 12l5 5L20 7" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="11" height="11" rx="2" />
+              <path d="M5 15V5a2 2 0 012-2h10" />
+            </svg>
+          )}
+        </button>
+        <span className="text-[10px] text-[var(--text-muted)] truncate hidden lg:inline">{match.description}</span>
+
         <div className="ml-auto flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--bg-primary)] border border-[var(--border)]">
           <TabBtn active={mode === "side-pseudo"} onClick={() => setMode("side-pseudo")} icon="⇔" label="Pseudo" />
           <TabBtn active={mode === "side-asm"} onClick={() => setMode("side-asm")} icon="⇔" label="ASM" />
@@ -127,13 +171,17 @@ function AlignedSideView({ pairs, isAsm }: { pairs: DiffPair[]; isAsm: boolean }
   return (
     <div className="flex h-full">
       <div className="flex-1 flex flex-col min-w-0 border-r border-[var(--border)]">
-        <div className="px-3 py-1 bg-[var(--bg-surface)] text-[10px] text-[var(--text-muted)] uppercase tracking-wider shrink-0 border-b border-[var(--border)]">Primary</div>
+        <div className="px-3 py-1.5 bg-[var(--bg-surface)] text-[10px] text-[var(--text-muted)] uppercase tracking-wider shrink-0 border-b border-[var(--border)] flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#7aa2f7]" />Primary
+        </div>
         <div ref={leftRef} onScroll={() => syncScroll("l")} className="flex-1 overflow-auto font-mono text-[11px] leading-[20px]">
           {pairs.map((p, i) => <AlignedLine key={i} text={p.left} kind={p.kind} side="left" num={i + 1} isAsm={isAsm} />)}
         </div>
       </div>
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="px-3 py-1 bg-[var(--bg-surface)] text-[10px] text-[var(--text-muted)] uppercase tracking-wider shrink-0 border-b border-[var(--border)]">Secondary</div>
+        <div className="px-3 py-1.5 bg-[var(--bg-surface)] text-[10px] text-[var(--text-muted)] uppercase tracking-wider shrink-0 border-b border-[var(--border)] flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#e0af68]" />Secondary
+        </div>
         <div ref={rightRef} onScroll={() => syncScroll("r")} className="flex-1 overflow-auto font-mono text-[11px] leading-[20px]">
           {pairs.map((p, i) => <AlignedLine key={i} text={p.right} kind={p.kind} side="right" num={i + 1} isAsm={isAsm} />)}
         </div>
@@ -227,20 +275,22 @@ function UnifiedView({ lines, isAsm }: { lines: string[]; isAsm: boolean }) {
 
 function UnifiedLine({ line, num, isAsm }: { line: string; num: number; isAsm: boolean }) {
   const prefix = line[0] || " ";
+  const code = prefix === "+" || prefix === "-" ? line.slice(1) : line;
   let bg = "";
-  let gutterCls = "text-[var(--text-muted)]/50";
-  if (prefix === "+") { bg = "bg-emerald-500/8"; gutterCls = "text-emerald-800"; }
-  else if (prefix === "-") { bg = "bg-rose-500/8"; gutterCls = "text-rose-800"; }
+  let signCls = "text-transparent";
+  let sign = " ";
+  if (prefix === "+") { bg = "bg-emerald-500/10"; signCls = "text-emerald-400"; sign = "+"; }
+  else if (prefix === "-") { bg = "bg-rose-500/10"; signCls = "text-rose-400"; sign = "−"; }
 
   return (
     <div className={`flex ${bg}`}>
-      <span className={`w-9 shrink-0 text-right pr-2 select-none text-[10px] ${gutterCls}`}>{num}</span>
-      <span className="whitespace-pre"><HighlightedCode text={line} isAsm={isAsm} /></span>
+      <span className="w-9 shrink-0 text-right pr-2 select-none text-[10px] text-[var(--text-muted)]/50">{num}</span>
+      <span className={`w-3 shrink-0 select-none text-[10px] ${signCls}`}>{sign}</span>
+      <span className="whitespace-pre"><HighlightedCode text={code} isAsm={isAsm} /></span>
     </div>
   );
 }
 
-/* ===== CFG Placeholder ===== */
 function TabBtn({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: string; label: string }) {
   return (
     <button

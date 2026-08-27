@@ -1,8 +1,9 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
-import { Toolbar } from "./components/Toolbar";
+import { Toolbar, type FilterCounts } from "./components/Toolbar";
 import { MatchTable } from "./components/MatchTable";
 import { DiffViewer } from "./components/DiffViewer";
 import { AnalyzeView } from "./components/AnalyzeView";
@@ -80,6 +81,8 @@ export default function App() {
   const [totalRows, setTotalRows] = useState(0);
   const [loadingRows, setLoadingRows] = useState(false);
   const [rowError, setRowError] = useState("");
+  const [filterCounts, setFilterCounts] = useState<FilterCounts | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestSeq = useRef(0);
   const loadingRowsRef = useRef(false);
@@ -88,6 +91,27 @@ export default function App() {
     refreshMcpStatus();
     const timer = setInterval(refreshMcpStatus, 3000);
     return () => clearInterval(timer);
+  }, []);
+
+  // App-wide drag & drop: accept .soff files anywhere in the window.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "over") {
+          setDragActive(true);
+        } else if (event.payload.type === "drop") {
+          setDragActive(false);
+          const path = event.payload.paths.find((p) => p.toLowerCase().endsWith(".soff"));
+          if (path) void loadSoffFile(path);
+        } else {
+          setDragActive(false);
+        }
+      })
+      .then((u) => { unlisten = u; });
+    return () => { unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleOpen = async () => {
@@ -110,6 +134,22 @@ export default function App() {
       if (requestId !== requestSeq.current) return;
       setSelected(null);
       setPage("analyze");
+      // Filter tab counts come from the analyze stats; failure is non-fatal.
+      invoke<{
+        best: number; partial: number; unreliable: number;
+        unmatched_primary: number; unmatched_secondary: number;
+      }>("get_analyze_stats", { path })
+        .then((stats) => {
+          if (requestId !== requestSeq.current) return;
+          setFilterCounts({
+            all: stats.best + stats.partial + stats.unreliable,
+            best: stats.best,
+            partial: stats.partial,
+            unreliable: stats.unreliable,
+            unmatched: stats.unmatched_primary + stats.unmatched_secondary,
+          });
+        })
+        .catch(() => setFilterCounts(null));
     } catch (error) {
       if (requestId !== requestSeq.current) return;
       loadingRowsRef.current = false;
@@ -117,6 +157,7 @@ export default function App() {
       setConfig(null);
       setMatches([]);
       setTotalRows(0);
+      setFilterCounts(null);
       setRowError(String(error));
     }
   };
@@ -317,6 +358,17 @@ export default function App() {
         onPageChange={setPage}
         hasData={!!config}
       />
+      {dragActive && (
+        <div className="drop-overlay">
+          <div className="flex flex-col items-center gap-3 animate-scale-in">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 16V4M12 4l-4 4M12 4l4 4" />
+              <path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeOpacity="0.6" />
+            </svg>
+            <span className="text-sm text-[var(--text-primary)] font-medium">Drop .soff file to open</span>
+          </div>
+        </div>
+      )}
       <div className="flex flex-col flex-1 min-w-0">
         {!config && page !== "soff" && page !== "diff" && <EmptyState onOpen={handleOpen} />}
 
@@ -342,7 +394,15 @@ export default function App() {
           <>
             {config ? (
               <>
-                <Toolbar config={config} filter={filter} onFilter={loadFilteredMatches} searchQuery={searchQuery} onSearch={handleSearch} />
+                <Toolbar
+                  config={config}
+                  filter={filter}
+                  onFilter={loadFilteredMatches}
+                  searchQuery={searchQuery}
+                  onSearch={handleSearch}
+                  onOpen={handleOpen}
+                  counts={filterCounts}
+                />
                 {rowError && <div className="px-3 py-2 text-[11px] font-mono text-red-400 bg-[var(--bg-secondary)] border-b border-[var(--border)]">{rowError}</div>}
                 <MatchTable
                   key={`${soffPath}:${filter}:${searchQuery}`}
@@ -365,8 +425,6 @@ export default function App() {
             match={selected}
             mainDb={config.main_db}
             diffDb={config.diff_db}
-            height={0}
-            onHeightChange={() => {}}
           />
         )}
         {page === "graph" && !selected && config && (
