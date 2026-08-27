@@ -1,5 +1,5 @@
 set_project("soff")
-set_version("0.1.0")
+set_version("0.3.1")
 set_languages("cxx17")
 
 add_requires("boost", {configs = {header_only = true}})
