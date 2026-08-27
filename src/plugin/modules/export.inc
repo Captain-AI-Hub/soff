@@ -1,4 +1,4 @@
-void extract_pseudocode_features(func_t* function, soff::FunctionFeature& feature, HexRaysExportContext& hexrays)
+void extract_pseudocode_features(ea_t func_ea, soff::FunctionFeature& feature, HexRaysExportContext& hexrays)
 {
     if (!hexrays.available) {
         return;
@@ -6,7 +6,7 @@ void extract_pseudocode_features(func_t* function, soff::FunctionFeature& featur
 
     hexrays_failure_t failure;
     soff::perf::add_counter("export.hexrays.pseudocode.attempt");
-    cfuncptr_t cfunc = decompile_func(function, &failure, DECOMP_NO_WAIT);
+    cfuncptr_t cfunc = soff_decompile(func_ea, &failure, DECOMP_NO_WAIT);
     if (cfunc == nullptr) {
         ++hexrays.pseudocode_failures;
         record_hexrays_failure(hexrays, failure);
@@ -191,19 +191,19 @@ void collect_switch_info(
     });
 }
 
-std::string skip_reason_for(func_t* function, const std::string& name, const ExportOptions& options)
+std::string skip_reason_for(const FuncInfo& function, const std::string& name, const ExportOptions& options)
 {
-    if (function == nullptr) {
+    if (function.start_ea == BADADDR) {
         return "invalid-function";
     }
-    if (function->start_ea < options.min_ea || function->start_ea > options.max_ea) {
+    if (function.start_ea < options.min_ea || function.start_ea > options.max_ea) {
         return "outside-range";
     }
     if (options.exclude_library_thunk) {
-        if ((function->flags & FUNC_LIB) != 0) {
+        if ((function.flags & FUNC_LIB) != 0) {
             return "library";
         }
-        if ((function->flags & FUNC_THUNK) != 0) {
+        if ((function.flags & FUNC_THUNK) != 0) {
             return "thunk";
         }
         if (starts_with(name, "nullsub_")) {
@@ -211,7 +211,7 @@ std::string skip_reason_for(func_t* function, const std::string& name, const Exp
         }
     }
     if (options.ignore_small_functions) {
-        const auto size = function->end_ea - function->start_ea;
+        const auto size = function.end_ea - function.start_ea;
         if (size <= 6) {
             return "small-function";
         }
@@ -549,10 +549,10 @@ bool has_data_ref_from(ea_t ea)
     return xref.first_from(ea, XREF_DATA);
 }
 
-soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false, bool skip_trivial_decompile = false)
+soff::FunctionFeature read_function_feature(const FuncInfo& function, ea_t imagebase, HexRaysExportContext* hexrays, bool use_microcode = false, bool skip_trivial_decompile = false)
 {
     soff::FunctionFeature feature;
-    const asize_t function_size = std::max<asize_t>(function_reserve_min_size, function->size());
+    const asize_t function_size = std::max<asize_t>(function_reserve_min_size, function.size());
     const auto capped_function_size = static_cast<std::size_t>(std::min<asize_t>(function_size, function_reserve_max_size));
     const auto estimated_instructions = std::max<std::size_t>(1, capped_function_size / instruction_reserve_divisor);
     feature.instruction_details.reserve(estimated_instructions);
@@ -564,16 +564,16 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     feature.assembly.reserve(estimated_instructions * assembly_reserve_multiplier);
     feature.stripped_assembly.reserve(estimated_instructions * stripped_assembly_reserve_multiplier);
     feature.mnemonics.reserve(estimated_instructions * mnemonic_reserve_multiplier);
-    feature.address = static_cast<soff::Address>(function->start_ea);
-    feature.rva = function->start_ea >= imagebase
-        ? static_cast<soff::Address>(function->start_ea - imagebase)
-        : static_cast<soff::Address>(function->start_ea);
+    feature.address = static_cast<soff::Address>(function.start_ea);
+    feature.rva = function.start_ea >= imagebase
+        ? static_cast<soff::Address>(function.start_ea - imagebase)
+        : static_cast<soff::Address>(function.start_ea);
     feature.segment_rva = feature.rva;
-    feature.size = static_cast<std::uint64_t>(function->end_ea - function->start_ea);
-    feature.function_flags = function->flags;
+    feature.size = static_cast<std::uint64_t>(function.end_ea - function.start_ea);
+    feature.function_flags = function.flags;
 
     qstring name;
-    get_func_name(&name, function->start_ea);
+    get_func_name(&name, function.start_ea);
     feature.name = to_string(name);
     if (feature.name.empty()) {
         std::ostringstream fallback;
@@ -582,21 +582,21 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     }
     feature.names = feature.name;
     feature.mangled_function = feature.name;
-    feature.prototype2 = attached_type_declaration(function->start_ea);
-    feature.prototype = guessed_type_declaration(function->start_ea);
+    feature.prototype2 = attached_type_declaration(function.start_ea);
+    feature.prototype = guessed_type_declaration(function.start_ea);
     if (feature.prototype.empty()) {
         feature.prototype = feature.prototype2;
     }
     if (feature.prototype2.empty()) {
-        feature.prototype2 = type_declaration(function->start_ea);
+        feature.prototype2 = type_declaration(function.start_ea);
     }
 
     qstring comment;
-    if (get_func_cmt(&comment, function, false) > 0) {
+    if (soff_get_func_cmt(&comment, function.start_ea, false) > 0) {
         feature.comment = to_string(comment);
     }
 
-    qflow_chart_t flow_chart("", function, function->start_ea, function->end_ea, 0);
+    SoffFlowChart flow_chart = soff_make_flow_chart(function);
     feature.node_count = static_cast<std::uint64_t>(flow_chart.size());
     for (auto block_index = 0; block_index < flow_chart.size(); ++block_index) {
         soff::BasicBlock block;
@@ -636,7 +636,7 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     std::uint64_t switch_info_attempts = 0;
     std::uint64_t string_xref_attempts = 0;
 
-    func_item_iterator_t iterator(function);
+    auto iterator = soff_make_item_iterator(function);
     for (bool ok = iterator.first(); ok; ok = iterator.next_code()) {
         const ea_t ea = iterator.current();
         insn_t instruction;
@@ -719,8 +719,8 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
             if (!xref.iscode) {
                 continue;
             }
-            const func_t* referenced_function = get_func(xref.to);
-            if (referenced_function == nullptr || referenced_function->start_ea != function->start_ea) {
+            const auto referenced_start = soff_get_func_start(xref.to);
+            if (referenced_start == BADADDR || referenced_start != function.start_ea) {
                 kgh_hash = decimal_multiply(std::move(kgh_hash), 31);
             }
             if (xref.type != fl_CN && xref.type != fl_CF) {
@@ -750,7 +750,7 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
         soff::perf::add_counter("export.string_xref.attempt", string_xref_attempts);
     }
 
-    feature.indegree = count_incoming_code_refs(function->start_ea);
+    feature.indegree = count_incoming_code_refs(function.start_ea);
     feature.outdegree = feature.call_references.size();
     feature.names = json_string_array(referenced_names);
     feature.assembly_addrs = json_address_array(assembly_addresses);
@@ -763,17 +763,17 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
 
     // Source file from DWARF debug info
     {
-        const char* src = get_sourcefile(function->start_ea);
-        if (src != nullptr && src[0] != '\0') {
+        const auto src = soff_get_sourcefile(function.start_ea);
+        if (!src.empty()) {
             feature.source_file = src;
         }
     }
 
     if (hexrays != nullptr && hexrays->requested
         && !(skip_trivial_decompile && feature.node_count <= 1)) {
-        extract_pseudocode_features(function, feature, *hexrays);
+        extract_pseudocode_features(function.start_ea, feature, *hexrays);
         if (use_microcode) {
-            extract_microcode_features(function, feature, *hexrays);
+            extract_microcode_features(function.start_ea, feature, *hexrays);
         }
     }
     return feature;
@@ -1005,24 +1005,25 @@ ExportResult build_ida_snapshot(
                 ++hexrays.cache_clears;
             }
 
-            func_t* function = getn_func(i);
-            if (function == nullptr) {
+            const ea_t function_ea = soff_func_ea_by_num(i);
+            FuncInfo function;
+            if (function_ea == BADADDR || !soff_get_func_info(function_ea, function)) {
                 ++result.stats.skipped_functions;
                 ++result.stats.skip_reasons["invalid-function"];
                 continue;
             }
             qstring name;
-            get_func_name(&name, function->start_ea);
+            get_func_name(&name, function.start_ea);
             std::string function_name = to_string(name);
             if (function_name.empty()) {
                 std::ostringstream fallback;
-                fallback << "sub_" << std::hex << static_cast<soff::Address>(function->start_ea);
+                fallback << "sub_" << std::hex << static_cast<soff::Address>(function.start_ea);
                 function_name = fallback.str();
             }
             result.stats.last_function_index = i;
-            result.stats.last_function_address = static_cast<soff::Address>(function->start_ea);
+            result.stats.last_function_address = static_cast<soff::Address>(function.start_ea);
             result.stats.last_function_name = function_name;
-            current_function_ea = function->start_ea;
+            current_function_ea = function.start_ea;
             current_function_name = function_name;
             const auto skip_reason = skip_reason_for(function, function_name, options);
             if (!skip_reason.empty()) {
@@ -1030,7 +1031,7 @@ ExportResult build_ida_snapshot(
                 ++result.stats.skip_reasons[skip_reason];
                 continue;
             }
-            if (existing_addresses.find(static_cast<soff::Address>(function->start_ea)) != existing_addresses.end()) {
+            if (existing_addresses.find(static_cast<soff::Address>(function.start_ea)) != existing_addresses.end()) {
                 ++result.stats.exported_functions;
                 ++result.stats.resumed_functions;
                 continue;
@@ -1038,7 +1039,7 @@ ExportResult build_ida_snapshot(
             // Export hook: before_export_function
             if (options.hooks != nullptr) {
                 if (!options.hooks->before_export_function(
-                        static_cast<soff::Address>(function->start_ea), function_name)) {
+                        static_cast<soff::Address>(function.start_ea), function_name)) {
                     ++result.stats.skipped_functions;
                     ++result.stats.skip_reasons["hook-rejected"];
                     continue;

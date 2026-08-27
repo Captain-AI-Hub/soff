@@ -83,6 +83,7 @@ namespace {
 // focused files below keep export, Hex-Rays/microcode, import, result UI,
 // graph UI, and action wiring independently navigable.
 #include "modules/common.inc"
+#include "modules/ida_compat.inc"
 #include "modules/settings.inc"
 #include "modules/export_helpers.inc"
 #include "modules/hexrays.inc"

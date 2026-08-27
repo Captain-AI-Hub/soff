@@ -74,26 +74,25 @@ int run_diff_ui()
 
 ea_t default_local_diff_primary()
 {
-    func_t* cursor_function = get_func(get_screen_ea());
-    if (cursor_function != nullptr) {
-        return cursor_function->start_ea;
+    const ea_t cursor_function = soff_get_func_start(get_screen_ea());
+    if (cursor_function != BADADDR) {
+        return cursor_function;
     }
-    func_t* first = getn_func(0);
-    return first != nullptr ? first->start_ea : BADADDR;
+    return soff_func_ea_by_num(0);
 }
 
 ea_t default_local_diff_secondary(ea_t primary_ea)
 {
     if (primary_ea != BADADDR) {
-        if (func_t* next = get_next_func(primary_ea); next != nullptr) {
-            return next->start_ea;
+        if (const ea_t next = soff_next_func_ea(primary_ea); next != BADADDR) {
+            return next;
         }
     }
     const auto function_count = get_func_qty();
     for (std::size_t i = 0; i < function_count; ++i) {
-        func_t* function = getn_func(i);
-        if (function != nullptr && function->start_ea != primary_ea) {
-            return function->start_ea;
+        const ea_t function_ea = soff_func_ea_by_num(i);
+        if (function_ea != BADADDR && function_ea != primary_ea) {
+            return function_ea;
         }
     }
     return BADADDR;
@@ -162,15 +161,15 @@ int run_local_diff_ui()
     }
 
     try {
-        func_t* primary_function = get_func(primary_ea);
-        func_t* secondary_function = get_func(secondary_ea);
-        if (primary_function == nullptr) {
+        FuncInfo primary_function;
+        FuncInfo secondary_function;
+        if (!soff_get_func_info(primary_ea, primary_function)) {
             throw soff::Error(soff::ErrorCode::diff_failed, "primary address is not inside a function");
         }
-        if (secondary_function == nullptr) {
+        if (!soff_get_func_info(secondary_ea, secondary_function)) {
             throw soff::Error(soff::ErrorCode::diff_failed, "secondary address is not inside a function");
         }
-        if (primary_function->start_ea == secondary_function->start_ea) {
+        if (primary_function.start_ea == secondary_function.start_ea) {
             throw soff::Error(soff::ErrorCode::diff_failed, "local diff needs two different functions");
         }
 
@@ -650,7 +649,7 @@ ssize_t idaapi soff_auto_mode_hook(void* user_data, int notification_code, va_li
     if (notification_code != ui_ready_to_run) {
         return 0;
     }
-    unhook_from_notification_point(HT_UI, &soff_auto_mode_hook, user_data);
+    soff_unhook_ui_notifications(&soff_auto_mode_hook, user_data);
     run_auto_mode();
     return 0;
 }

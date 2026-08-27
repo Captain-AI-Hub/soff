@@ -128,17 +128,16 @@ std::string clean_microcode_text(std::string_view microcode)
     return cleaned;
 }
 
-void extract_microcode_features(func_t* function, soff::FunctionFeature& feature, HexRaysExportContext& hexrays)
+void extract_microcode_features(ea_t func_ea, soff::FunctionFeature& feature, HexRaysExportContext& hexrays)
 {
     if (!hexrays.available) {
         return;
     }
 
-    mba_ranges_t ranges(function);
     hexrays_failure_t failure;
     soff::perf::add_counter("export.hexrays.microcode.attempt");
     // RAII: any exception while collecting blocks would otherwise leak the mba.
-    std::unique_ptr<mba_t> mba(gen_microcode(ranges, &failure, nullptr, DECOMP_WARNINGS, MMAT_GENERATED));
+    std::unique_ptr<mba_t> mba(soff_gen_microcode(func_ea, &failure));
     if (mba == nullptr) {
         ++hexrays.microcode_failures;
         record_hexrays_failure(hexrays, failure);
@@ -159,7 +158,7 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
         }
 
         soff::BasicBlock micro_block;
-        micro_block.start = synthetic_microcode_block_address(function->start_ea, i);
+        micro_block.start = synthetic_microcode_block_address(func_ea, i);
         micro_block.end = micro_block.start + 1;
 
         qstring block_rendered;
@@ -203,7 +202,7 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
             if (successor_block == nullptr || successor_block->type == BLT_STOP) {
                 continue;
             }
-            micro_block.successors.push_back(synthetic_microcode_block_address(function->start_ea, successor));
+            micro_block.successors.push_back(synthetic_microcode_block_address(func_ea, successor));
         }
 
         feature.microcode_blocks.push_back(std::move(micro_block));

@@ -1,10 +1,10 @@
 bool apply_pseudocode_comment(ea_t address, std::uint64_t pseudoitp, const std::string& comment)
 {
-    func_t* function = get_func(address);
-    if (function == nullptr) {
+    const ea_t func_start = soff_get_func_start(address);
+    if (func_start == BADADDR) {
         return false;
     }
-    user_cmts_t* comments = restore_user_cmts(function->start_ea);
+    user_cmts_t* comments = restore_user_cmts(func_start);
     if (comments == nullptr) {
         comments = user_cmts_new();
     }
@@ -16,7 +16,7 @@ bool apply_pseudocode_comment(ea_t address, std::uint64_t pseudoitp, const std::
     location.ea = address;
     location.itp = static_cast<item_preciser_t>(pseudoitp);
     user_cmts_insert(comments, location, citem_cmt_t(comment.c_str()));
-    save_user_cmts(function->start_ea, comments);
+    save_user_cmts(func_start, comments);
     user_cmts_free(comments);
     return true;
 }
@@ -26,12 +26,12 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
     ImportApplySummary summary;
     for (const auto& item : plan.items) {
         const auto address = static_cast<ea_t>(item.address);
-        func_t* function = get_func(address);
+        const ea_t func_start = soff_get_func_start(address);
         if (item.operation == soff::ui::ImportOperation::rename_function
             || item.operation == soff::ui::ImportOperation::apply_prototype
             || item.operation == soff::ui::ImportOperation::set_function_comment
             || item.operation == soff::ui::ImportOperation::set_function_flags) {
-            if (function == nullptr || function->start_ea != address) {
+            if (func_start == BADADDR || func_start != address) {
                 ++summary.missing_function;
                 continue;
             }
@@ -40,12 +40,12 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
         switch (item.operation) {
         case soff::ui::ImportOperation::rename_function: {
             qstring current_name;
-            get_func_name(&current_name, function->start_ea);
+            get_func_name(&current_name, func_start);
             if (to_string(current_name) == item.imported_name) {
                 ++summary.already_named;
                 continue;
             }
-            if (set_name(function->start_ea, item.imported_name.c_str(), SN_CHECK | SN_NOWARN)) {
+            if (set_name(func_start, item.imported_name.c_str(), SN_CHECK | SN_NOWARN)) {
                 ++summary.renamed;
             } else {
                 ++summary.failed;
@@ -53,31 +53,36 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
             break;
         }
         case soff::ui::ImportOperation::apply_prototype:
-            if (apply_cdecl(nullptr, function->start_ea, c_declaration_for_apply(item.value).c_str(), 0)) {
+            if (apply_cdecl(nullptr, func_start, c_declaration_for_apply(item.value).c_str(), 0)) {
                 ++summary.prototypes;
             } else {
                 ++summary.failed;
             }
             break;
         case soff::ui::ImportOperation::set_function_comment:
-            if (set_func_cmt(function, item.value.c_str(), false)) {
+            if (soff_set_func_cmt(func_start, item.value.c_str(), false)) {
                 ++summary.function_comments;
             } else {
                 ++summary.failed;
             }
             break;
-        case soff::ui::ImportOperation::set_function_flags:
+        case soff::ui::ImportOperation::set_function_flags: {
             // Only import user-meaningful bits; overwriting the whole flags
             // word would clobber analysis-computed state (frame, SP, far...).
-            function->flags = static_cast<decltype(function->flags)>(
-                (function->flags & ~FUNC_NORET)
-                | (static_cast<decltype(function->flags)>(item.numeric_value) & FUNC_NORET));
-            if (update_func(function)) {
+            FuncInfo info;
+            if (!soff_get_func_info(func_start, info)) {
+                ++summary.failed;
+                break;
+            }
+            const auto new_flags = (info.flags & ~static_cast<uint64_t>(FUNC_NORET))
+                | (item.numeric_value & static_cast<uint64_t>(FUNC_NORET));
+            if (soff_update_func_flags(func_start, new_flags)) {
                 ++summary.function_flags;
             } else {
                 ++summary.failed;
             }
             break;
+        }
         case soff::ui::ImportOperation::set_instruction_comment:
             if (set_cmt(address, item.value.c_str(), false)) {
                 ++summary.instruction_comments;

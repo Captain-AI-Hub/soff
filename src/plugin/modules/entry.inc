@@ -207,7 +207,7 @@ struct soff_plugin_t : public plugmod_t
         // is ready; running it here in the constructor would race the loader
         // and the initial auto-analysis.
         if (env_value("DIAPHORA_AUTO")) {
-            hook_to_notification_point(HT_UI, &soff_auto_mode_hook, this);
+            soff_hook_ui_notifications(&soff_auto_mode_hook, this);
         }
     }
 
