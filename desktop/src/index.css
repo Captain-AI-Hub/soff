@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* NOTE: no blanket `* { margin: 0; padding: 0 }` reset here — unlayered rules
+   would defeat Tailwind's @layer utilities (px/py padding silently stops
+   working). Tailwind's preflight already handles the reset in @layer base. */
+
 :root {
   --bg-primary: #0c0c14;
   --bg-secondary: #131320;
@@ -24,12 +28,6 @@
   --border-subtle: #1d1e31;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   --radius: 8px;
-}
-
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
 }
 
 body {
