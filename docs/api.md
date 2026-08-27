@@ -62,6 +62,21 @@ CREATE TABLE unmatched (
 ## CLI (soff_cli)
 
 ```bash
+# Export an IDA database or raw binary through headless IDA.
+# Requires the Soff plugin in the IDA plugins directory; IDA is located
+# via --ida, $IDADIR, or PATH.
+soff_cli export <input.i64|.idb|binary> [--out <out.sqlite>] \
+    [--ida <dir|exe>] [--export-timeout <sec>] [--no-decompiler] [--microcode] \
+    [--no-exclude-library-thunk] [--ignore-small-functions] \
+    [--from <addr>] [--to <addr>]
+
+# End-to-end diff: .i64/.idb/binary inputs are exported first, .sqlite
+# inputs are used directly.
+soff_cli diff <primary> <secondary> --out <result.soff> \
+    [--ida <dir|exe>] [--export-dir <dir>] [--export-timeout <sec>] \
+    [--unreliable] [--experimental] [--no-slow] [--relaxed] \
+    [--max-rows <n>] [--timeout <seconds>]
+
 # Diff two exported databases
 soff_cli diff-db <primary.sqlite> <secondary.sqlite> \
     --out <result.soff> \
@@ -69,9 +84,14 @@ soff_cli diff-db <primary.sqlite> <secondary.sqlite> \
     --unreliable \
     --ml-model <model.json>
 
-# Environment variables
+# Environment variables (consumed by the IDA plugin in headless mode)
+DIAPHORA_AUTO=1                       # headless mode: export on UI ready, then exit
 DIAPHORA_EXPORT_FILE=output.sqlite    # override export path
-DIAPHORA_AUTO=1                       # headless mode in IDA
+DIAPHORA_USE_DECOMPILER=1|0           # Hex-Rays pseudocode export
+DIAPHORA_USE_MICROCODE=1|0            # Hex-Rays microcode export
+DIAPHORA_EXCLUDE_LIBRARY_THUNK=1|0    # skip library/thunk/nullsub functions
+DIAPHORA_IGNORE_SMALL_FUNCTIONS=1|0   # skip functions with < 4 instructions
+DIAPHORA_FROM_ADDRESS / DIAPHORA_TO_ADDRESS  # export address range
 ```
 
 ## MCP Tools (soff-mcp)

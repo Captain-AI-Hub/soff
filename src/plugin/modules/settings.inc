@@ -136,6 +136,8 @@ void load_diff_options(DiffUiOptions& options)
 void apply_env_overrides(ExportOptions& options)
 {
     read_bool_env("DIAPHORA_USE_DECOMPILER", options.use_decompiler);
+    read_bool_env("DIAPHORA_USE_MICROCODE", options.use_microcode);
+    read_bool_env("SOFF_USE_MICROCODE", options.use_microcode);
     read_bool_env("DIAPHORA_EXCLUDE_LIBRARY_THUNK", options.exclude_library_thunk);
     read_bool_env("DIAPHORA_IGNORE_SMALL_FUNCTIONS", options.ignore_small_functions);
     read_address_env("DIAPHORA_FROM_ADDRESS", options.min_ea);

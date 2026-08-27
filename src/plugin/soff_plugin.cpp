@@ -27,6 +27,7 @@
 #include <cstdio>
 #endif
 
+#include <auto.hpp>
 #include <bytes.hpp>
 #include <funcs.hpp>
 #include <gdl.hpp>

@@ -575,6 +575,10 @@ void run_auto_mode()
 {
     msg("Soff: DIAPHORA_AUTO mode activated\n");
 
+    // Belt and braces: even after ui_ready_to_run the analysis queue may
+    // still hold work; exporting before it drains would see zero functions.
+    auto_wait();
+
     // Determine export path
     std::filesystem::path export_path;
     if (const char* env_out = env_value("DIAPHORA_EXPORT_FILE")) {
@@ -636,5 +640,18 @@ void run_auto_mode()
 
     msg("Soff: DIAPHORA_AUTO: done, requesting exit\n");
     qexit(0);
+}
+
+// Headless runs are deferred to ui_ready_to_run: the PLUGIN_MULTI constructor
+// fires while the IDB is still opening, long before the initial auto-analysis
+// has populated the function list.
+ssize_t idaapi soff_auto_mode_hook(void* user_data, int notification_code, va_list)
+{
+    if (notification_code != ui_ready_to_run) {
+        return 0;
+    }
+    unhook_from_notification_point(HT_UI, &soff_auto_mode_hook, user_data);
+    run_auto_mode();
+    return 0;
 }
 

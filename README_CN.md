@@ -93,12 +93,27 @@ cp soff.dylib "$IDADIR/plugins/"
 ### 命令行
 
 ```bash
-# 差异比较
-soff_cli diff primary.sqlite secondary.sqlite -o results.soff
+# 将 IDA 数据库（或原始二进制）导出为 .sqlite 特征数据库。
+# 以无头模式驱动 IDA，需要先把 Soff 插件放入 IDA plugins 目录。
+# IDA 位置通过 --ida、$IDADIR 或 PATH 查找。
+soff_cli export app.i64 --out app.sqlite
+soff_cli export app.exe --ida /opt/ida --microcode
+
+# 端到端差异比较。输入可以是 .i64/.idb 数据库、原始二进制
+# （先经无头 IDA 导出），或已有的 .sqlite 导出文件。
+soff_cli diff old.i64 new.i64 --out results.soff
+soff_cli diff primary.sqlite secondary.sqlite --out results.soff
+
+# 直接比较两个已导出的数据库
+soff_cli diff-db primary.sqlite secondary.sqlite --out results.soff
 
 # 查看摘要
-soff_cli info results.soff
+soff_cli inspect-db results.soff
 ```
+
+无头导出选项：`--no-decompiler`、`--microcode`、
+`--no-exclude-library-thunk`、`--ignore-small-functions`、`--from <addr>`、
+`--to <addr>`、`--export-timeout <sec>`、`--export-dir <dir>`（仅 diff）。
 
 ---
 

@@ -8,17 +8,43 @@
 
 #include <cstdint>
 #include <array>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <signal.h>
+#include <spawn.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#define SOFF_ENVIRON (*_NSGetEnviron())
+#else
+extern char** environ;
+#define SOFF_ENVIRON environ
+#endif
+#endif
 
 namespace {
 
@@ -36,6 +62,16 @@ void print_usage()
         << "  soff_cli batch-diff <manifest.json> [--out <dir>]\n"
         << "  soff_cli parity-report <manifest.json>\n"
         << "  soff_cli patch-diff <result.soff> <main.sqlite> <diff.sqlite> [--json]\n"
+        << "  soff_cli export <input.i64|.idb|binary> [--out <out.sqlite>] [--ida <dir|exe>]\n"
+           "             [--export-timeout <sec>] [--no-decompiler] [--microcode]\n"
+           "             [--no-exclude-library-thunk] [--ignore-small-functions]\n"
+           "             [--from <addr>] [--to <addr>]\n"
+        << "  soff_cli diff <primary.i64|.sqlite|binary> <secondary.i64|.sqlite|binary> --out <result.soff>\n"
+           "             [--ida <dir|exe>] [--export-dir <dir>] [--export-timeout <sec>]\n"
+           "             [--no-decompiler] [--microcode] [--no-exclude-library-thunk]\n"
+           "             [--ignore-small-functions] [--from <addr>] [--to <addr>]\n"
+           "             [--unreliable] [--experimental] [--no-slow] [--relaxed] [--progress]\n"
+           "             [--ml-model <model.json>] [--max-rows <n>] [--timeout <seconds>]\n"
         << "  soff_cli ml-export <result.soff> <main.sqlite> <diff.sqlite> --out <file.csv|.json>\n"
         << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>] [--root <fixture-root>]\n";
 }
@@ -707,6 +743,564 @@ int check_m5_fixture(int argc, char** argv)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Headless IDA export support (export / diff pipeline commands)
+// ---------------------------------------------------------------------------
+
+std::string lowercase_extension(const std::filesystem::path& path)
+{
+    auto ext = path.extension().string();
+    for (auto& ch : ext) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return ext;
+}
+
+bool is_sqlite_export(const std::filesystem::path& path)
+{
+    return lowercase_extension(path) == ".sqlite";
+}
+
+// Anything that is not an exported .sqlite is treated as an IDA input:
+// .i64/.idb databases or a raw binary IDA can load and analyse.
+bool needs_ida_export(const std::filesystem::path& path)
+{
+    return !is_sqlite_export(path);
+}
+
+// Sets environment variables for a child process and restores the previous
+// values on destruction. Child processes inherit the modified block.
+class ScopedEnvironment
+{
+public:
+    void set(const std::string& name, const std::string& value)
+    {
+        if (saved_.find(name) == saved_.end()) {
+            if (const char* current = std::getenv(name.c_str())) {
+                saved_[name] = std::string(current);
+            } else {
+                saved_[name] = std::nullopt;
+            }
+        }
+#if defined(_WIN32)
+        SetEnvironmentVariableA(name.c_str(), value.c_str());
+#else
+        setenv(name.c_str(), value.c_str(), 1);
+#endif
+    }
+
+    ~ScopedEnvironment()
+    {
+        for (const auto& [name, previous] : saved_) {
+#if defined(_WIN32)
+            SetEnvironmentVariableA(name.c_str(), previous.has_value() ? previous->c_str() : nullptr);
+#else
+            if (previous.has_value()) {
+                setenv(name.c_str(), previous->c_str(), 1);
+            } else {
+                unsetenv(name.c_str());
+            }
+#endif
+        }
+    }
+
+private:
+    std::map<std::string, std::optional<std::string>> saved_;
+};
+
+struct ProcessResult
+{
+    int exit_code = -1;
+    bool timed_out = false;
+};
+
+#if defined(_WIN32)
+std::string windows_quote(const std::string& arg)
+{
+    std::string out = "\"";
+    std::size_t backslashes = 0;
+    for (const char ch : arg) {
+        if (ch == '\\') {
+            ++backslashes;
+            continue;
+        }
+        if (ch == '"') {
+            out.append(backslashes * 2 + 1, '\\');
+            out += '"';
+        } else {
+            out.append(backslashes, '\\');
+            out += ch;
+        }
+        backslashes = 0;
+    }
+    out.append(backslashes * 2, '\\');
+    out += '"';
+    return out;
+}
+#endif
+
+// Runs args[0] with the given arguments, waiting up to timeout_seconds
+// (0 = wait forever). Environment is inherited from the current process.
+ProcessResult run_process(const std::vector<std::string>& args, std::uint32_t timeout_seconds)
+{
+    if (args.empty()) {
+        throw std::runtime_error("no process to run");
+    }
+#if defined(_WIN32)
+    std::string cmdline;
+    for (const auto& arg : args) {
+        if (!cmdline.empty()) {
+            cmdline += ' ';
+        }
+        cmdline += windows_quote(arg);
+    }
+    std::vector<char> mutable_cmdline(cmdline.begin(), cmdline.end());
+    mutable_cmdline.push_back('\0');
+
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessA(nullptr, mutable_cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        throw std::runtime_error("failed to start process: " + args.front());
+    }
+    const auto wait_ms = timeout_seconds == 0 ? INFINITE : static_cast<DWORD>(timeout_seconds) * 1000;
+    ProcessResult result;
+    if (WaitForSingleObject(process.hProcess, wait_ms) == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, 5000);
+        result.timed_out = true;
+    } else {
+        DWORD code = 0;
+        GetExitCodeProcess(process.hProcess, &code);
+        result.exit_code = static_cast<int>(code);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return result;
+#else
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) {
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = 0;
+    const int spawn_error = posix_spawnp(&pid, args.front().c_str(), nullptr, nullptr, argv.data(), SOFF_ENVIRON);
+    if (spawn_error != 0) {
+        throw std::runtime_error("failed to start " + args.front() + ": " + std::strerror(spawn_error));
+    }
+
+    const auto has_timeout = timeout_seconds != 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+    int status = 0;
+    while (true) {
+        const pid_t finished = waitpid(pid, &status, WNOHANG);
+        if (finished == pid) {
+            ProcessResult result;
+            if (WIFEXITED(status)) {
+                result.exit_code = WEXITSTATUS(status);
+            }
+            return result;
+        }
+        if (finished == -1) {
+            throw std::runtime_error("waitpid failed for: " + args.front());
+        }
+        if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return {-1, true};
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+#endif
+}
+
+std::filesystem::path find_executable_in_dir(
+    const std::filesystem::path& dir,
+    const std::vector<std::string>& names)
+{
+    std::error_code ec;
+    for (const auto& name : names) {
+        for (const auto* suffix : {"", ".exe"}) {
+            const auto candidate = dir / (name + suffix);
+            if (std::filesystem::is_regular_file(candidate, ec)) {
+                return std::filesystem::absolute(candidate);
+            }
+        }
+    }
+    return {};
+}
+
+std::filesystem::path find_executable_on_path(const std::string& name)
+{
+#if defined(_WIN32)
+    const std::string file_name = name + ".exe";
+    const char separator = ';';
+#else
+    const std::string& file_name = name;
+    const char separator = ':';
+#endif
+    const char* path_env = std::getenv("PATH");
+    if (path_env == nullptr) {
+        return {};
+    }
+    std::stringstream entries(path_env);
+    std::string entry;
+    while (std::getline(entries, entry, separator)) {
+        if (entry.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        const auto candidate = std::filesystem::path(entry) / file_name;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+// Prefer the console (idat) binaries; the GUI variants only as a fallback.
+// .i64 databases need the 64-bit capable tools.
+std::vector<std::string> ida_candidate_names(const std::filesystem::path& input)
+{
+    const auto ext = lowercase_extension(input);
+    if (ext == ".i64") {
+        return {"idat64", "idat", "ida64", "ida"};
+    }
+    if (ext == ".idb" || ext == ".i32") {
+        return {"idat", "idat64", "ida", "ida64"};
+    }
+    return {"idat64", "idat", "ida64", "ida"};
+}
+
+std::filesystem::path resolve_ida_executable(const std::filesystem::path& input, const std::string& hint)
+{
+    const auto names = ida_candidate_names(input);
+    std::error_code ec;
+    if (!hint.empty()) {
+        const std::filesystem::path hint_path(hint);
+        if (std::filesystem::is_regular_file(hint_path, ec)) {
+            return std::filesystem::absolute(hint_path);
+        }
+        if (std::filesystem::is_directory(hint_path, ec)) {
+            if (const auto found = find_executable_in_dir(hint_path, names); !found.empty()) {
+                return found;
+            }
+            throw std::runtime_error("no IDA executable (idat64/idat) found in --ida directory: " + hint);
+        }
+        throw std::runtime_error("--ida path does not exist: " + hint);
+    }
+    if (const char* idadir = std::getenv("IDADIR"); idadir != nullptr && idadir[0] != '\0') {
+        if (const auto found = find_executable_in_dir(std::filesystem::path(idadir), names); !found.empty()) {
+            return found;
+        }
+    }
+    for (const auto& name : names) {
+        if (const auto found = find_executable_on_path(name); !found.empty()) {
+            return found;
+        }
+    }
+    throw std::runtime_error(
+        "cannot locate an IDA executable (idat64/idat); pass --ida <install-dir|exe> or set IDADIR");
+}
+
+struct HeadlessExportOptions
+{
+    bool use_decompiler = true;
+    bool use_microcode = false;
+    bool exclude_library_thunk = true;
+    bool ignore_small_functions = false;
+    std::string from_address;
+    std::string to_address;
+    std::string ida_hint;
+    std::uint32_t timeout_seconds = 0; // 0 = unlimited
+};
+
+bool parse_headless_export_option(int& i, int argc, char** argv, HeadlessExportOptions& options)
+{
+    const std::string_view option(argv[i]);
+    if (option == "--ida" && i + 1 < argc) {
+        options.ida_hint = argv[++i];
+    } else if (option == "--export-timeout" && i + 1 < argc) {
+        options.timeout_seconds = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+    } else if (option == "--no-decompiler") {
+        options.use_decompiler = false;
+    } else if (option == "--microcode") {
+        options.use_microcode = true;
+    } else if (option == "--no-exclude-library-thunk") {
+        options.exclude_library_thunk = false;
+    } else if (option == "--ignore-small-functions") {
+        options.ignore_small_functions = true;
+    } else if (option == "--from" && i + 1 < argc) {
+        options.from_address = argv[++i];
+    } else if (option == "--to" && i + 1 < argc) {
+        options.to_address = argv[++i];
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// IDAPython fallback executed via -S. When the Soff plugin handled the export
+// the output file already exists and this script is a no-op; otherwise it
+// fails fast instead of leaving IDA interactive forever.
+std::filesystem::path write_headless_guard_script()
+{
+    static const char script[] =
+        "import os\n"
+        "import idaapi\n"
+        "import idc\n"
+        "idaapi.auto_wait()\n"
+        "_out = os.environ.get(\"DIAPHORA_EXPORT_FILE\", \"\")\n"
+        "if not _out or not os.path.exists(_out):\n"
+        "    idc.msg(\"Soff: headless export produced no output; is the Soff plugin installed in the IDA plugins directory?\\n\")\n"
+        "    idc.qexit(3)\n";
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path()
+        / ("soff_headless_guard_" + std::to_string(nonce) + ".py");
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        throw std::runtime_error("cannot write headless guard script: " + path.string());
+    }
+    file << script;
+    return path;
+}
+
+std::filesystem::path export_via_ida(
+    const std::filesystem::path& input_path,
+    std::filesystem::path output,
+    const HeadlessExportOptions& options)
+{
+    const auto input = std::filesystem::absolute(input_path);
+    if (!std::filesystem::exists(input)) {
+        throw std::runtime_error("input does not exist: " + input.string());
+    }
+    if (output.empty()) {
+        output = input;
+        output.replace_extension(".sqlite");
+    }
+    output = std::filesystem::absolute(output);
+
+    const auto ida = resolve_ida_executable(input, options.ida_hint);
+    const auto guard_script = write_headless_guard_script();
+
+    // A stale export must never mask a failed run.
+    std::error_code remove_error;
+    std::filesystem::remove(output, remove_error);
+
+    ScopedEnvironment env;
+    env.set("DIAPHORA_AUTO", "1");
+    env.set("DIAPHORA_EXPORT_FILE", output.string());
+    env.set("DIAPHORA_USE_DECOMPILER", options.use_decompiler ? "1" : "0");
+    env.set("DIAPHORA_USE_MICROCODE", options.use_microcode ? "1" : "0");
+    env.set("DIAPHORA_EXCLUDE_LIBRARY_THUNK", options.exclude_library_thunk ? "1" : "0");
+    env.set("DIAPHORA_IGNORE_SMALL_FUNCTIONS", options.ignore_small_functions ? "1" : "0");
+    if (!options.from_address.empty()) {
+        env.set("DIAPHORA_FROM_ADDRESS", options.from_address);
+    }
+    if (!options.to_address.empty()) {
+        env.set("DIAPHORA_TO_ADDRESS", options.to_address);
+    }
+
+    std::cout << "headless-export input=" << input.string()
+              << " ida=" << ida.string()
+              << " out=" << output.string() << std::endl;
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = run_process(
+        {ida.string(), "-A", "-S" + guard_script.string(), input.string()},
+        options.timeout_seconds);
+    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::error_code guard_remove_error;
+    std::filesystem::remove(guard_script, guard_remove_error);
+
+    if (result.timed_out) {
+        throw std::runtime_error(
+            "IDA export timed out after " + std::to_string(options.timeout_seconds) + "s: " + input.string());
+    }
+    if (const auto error = validate_export_database(output, "export"); !error.empty()) {
+        throw std::runtime_error(
+            "IDA export failed (exit code " + std::to_string(result.exit_code) + "): " + error
+            + "; check that the Soff plugin is installed in the IDA plugins directory");
+    }
+
+    soff::db::Database database;
+    database.open(output);
+    std::cout << "headless-export done input=" << input.string()
+              << " functions=" << database.query_int("select count(*) from functions")
+              << " seconds=" << std::fixed << std::setprecision(1) << seconds
+              << " out=" << output.string() << std::endl;
+    return output;
+}
+
+// Returns a .sqlite path for the input, exporting through headless IDA first
+// when the input is an .i64/.idb database or a raw binary.
+std::filesystem::path ensure_sqlite_input(
+    const std::filesystem::path& input,
+    const std::filesystem::path& export_dir,
+    const HeadlessExportOptions& options)
+{
+    if (!needs_ida_export(input)) {
+        return input;
+    }
+    std::filesystem::path output;
+    if (!export_dir.empty()) {
+        std::filesystem::create_directories(export_dir);
+        output = export_dir / input.filename();
+        output.replace_extension(".sqlite");
+    }
+    return export_via_ida(input, output, options);
+}
+
+int cmd_export(int argc, char** argv)
+{
+    const std::filesystem::path input(argv[2]);
+    std::filesystem::path output;
+    HeadlessExportOptions options;
+    for (int i = 3; i < argc; ++i) {
+        const std::string_view option(argv[i]);
+        if (option == "--out" && i + 1 < argc) {
+            output = argv[++i];
+        } else if (!parse_headless_export_option(i, argc, argv, options)) {
+            return 2;
+        }
+    }
+    export_via_ida(input, output, options);
+    return 0;
+}
+
+struct CliProgressHooks : soff::DiffHooks
+{
+    std::size_t index = 0;
+    std::size_t total = 0;
+    std::size_t matches = 0;
+
+    std::optional<std::string> on_launch_heuristic(
+        std::string_view name, std::string_view sql) override
+    {
+        ++index;
+        std::cout << "{\"phase\":\"heuristic\",\"index\":" << index
+                  << ",\"total\":" << total
+                  << ",\"matches\":" << matches
+                  << ",\"name\":\"" << name << "\"}" << std::endl;
+        return std::string(sql);
+    }
+
+    soff::MatchDecision on_match(const soff::MatchContext& ctx) override
+    {
+        ++matches;
+        return {true, ctx.ratio};
+    }
+};
+
+int run_diff_session_cli(
+    const std::filesystem::path& main_db,
+    const std::filesystem::path& diff_db,
+    const std::filesystem::path& out_db,
+    soff::diff::DiffSessionOptions& options,
+    bool progress)
+{
+    CliProgressHooks progress_hooks;
+    if (progress) {
+        const auto& h = soff::diff::builtin_heuristics();
+        progress_hooks.total = h.size();
+        options.hooks = &progress_hooks;
+        std::cout << "{\"phase\":\"validate\",\"step\":\"primary\"}" << std::endl;
+    }
+
+    if (const auto error = validate_export_database(main_db, "main"); !error.empty()) {
+        throw std::runtime_error(error);
+    }
+
+    if (progress) {
+        std::cout << "{\"phase\":\"validate\",\"step\":\"secondary\"}" << std::endl;
+    }
+
+    if (const auto error = validate_export_database(diff_db, "diff"); !error.empty()) {
+        throw std::runtime_error(error);
+    }
+
+    if (progress) {
+        std::cout << "{\"phase\":\"running\"}" << std::endl;
+    }
+
+    const auto summary = soff::diff::DiffSession{options}.run_all(main_db, diff_db, out_db);
+
+    if (progress) {
+        std::cout << "{\"phase\":\"done\""
+                  << ",\"best\":" << summary.results.best
+                  << ",\"partial\":" << summary.results.partial
+                  << ",\"unreliable\":" << summary.results.unreliable
+                  << ",\"unmatched_primary\":" << summary.results.unmatched_primary
+                  << ",\"unmatched_secondary\":" << summary.results.unmatched_secondary
+                  << ",\"out\":\"" << out_db.string() << "\"}" << std::endl;
+    } else {
+        std::cout << "heuristics=" << summary.heuristics
+                  << " same_processor=" << (summary.same_processor ? "yes" : "no")
+                  << " candidates=" << summary.candidates
+                  << " accepted=" << summary.accepted
+                  << " multimatches=" << summary.multimatches
+                  << " best=" << summary.results.best
+                  << " partial=" << summary.results.partial
+                  << " unreliable=" << summary.results.unreliable
+                  << " result_multimatch=" << summary.results.multimatch
+                  << " unmatched_primary=" << summary.results.unmatched_primary
+                  << " unmatched_secondary=" << summary.results.unmatched_secondary
+                  << " row_limited=" << summary.row_limited_heuristics
+                  << " timed_out=" << summary.timed_out_heuristics
+                  << " cancelled=" << summary.cancelled_heuristics
+                  << " out=" << out_db.string() << '\n';
+    }
+    return 0;
+}
+
+// Full pipeline: .i64/.idb/binary inputs are exported through headless IDA
+// first, .sqlite inputs are used directly, then a normal diff runs.
+int cmd_diff_pipeline(int argc, char** argv)
+{
+    const std::filesystem::path primary_input(argv[2]);
+    const std::filesystem::path secondary_input(argv[3]);
+
+    std::filesystem::path out_db;
+    std::filesystem::path export_dir;
+    HeadlessExportOptions export_options;
+    soff::diff::DiffSessionOptions diff_options;
+    bool progress = false;
+    for (int i = 4; i < argc; ++i) {
+        const std::string_view option(argv[i]);
+        if (option == "--out" && i + 1 < argc) {
+            out_db = argv[++i];
+        } else if (option == "--export-dir" && i + 1 < argc) {
+            export_dir = argv[++i];
+        } else if (option == "--unreliable") {
+            diff_options.sql.enable_unreliable = true;
+        } else if (option == "--experimental") {
+            diff_options.sql.enable_experimental = true;
+        } else if (option == "--no-slow") {
+            diff_options.sql.enable_slow = false;
+        } else if (option == "--relaxed") {
+            diff_options.sql.enable_relaxed_ratio = true;
+        } else if (option == "--ml-model" && i + 1 < argc) {
+            diff_options.ml_model_path = argv[++i];
+        } else if (option == "--max-rows" && i + 1 < argc) {
+            diff_options.sql.max_processed_rows = static_cast<std::size_t>(std::stoull(argv[++i]));
+        } else if (option == "--timeout" && i + 1 < argc) {
+            diff_options.sql.timeout_seconds = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (option == "--progress") {
+            progress = true;
+        } else if (!parse_headless_export_option(i, argc, argv, export_options)) {
+            return 2;
+        }
+    }
+    if (out_db.empty()) {
+        return 2;
+    }
+
+    const auto main_db = ensure_sqlite_input(primary_input, export_dir, export_options);
+    const auto diff_db = ensure_sqlite_input(secondary_input, export_dir, export_options);
+    return run_diff_session_cli(main_db, diff_db, out_db, diff_options, progress);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -990,6 +1584,22 @@ int main(int argc, char** argv)
             return check_m5_fixture(argc, argv);
         }
 
+        if (command == "export" && argc >= 3) {
+            if (const auto rc = cmd_export(argc, argv); rc == 0) {
+                return 0;
+            }
+            print_usage();
+            return 2;
+        }
+
+        if (command == "diff" && argc >= 4) {
+            if (const auto rc = cmd_diff_pipeline(argc, argv); rc == 0) {
+                return 0;
+            }
+            print_usage();
+            return 2;
+        }
+
         if (command == "diff-db") {
             const std::filesystem::path main_db(argv[2]);
             const std::filesystem::path diff_db(argv[3]);
@@ -1000,83 +1610,7 @@ int main(int argc, char** argv)
                 print_usage();
                 return 2;
             }
-
-            struct CliProgressHooks : soff::DiffHooks
-            {
-                std::size_t index = 0;
-                std::size_t total = 0;
-                std::size_t matches = 0;
-
-                std::optional<std::string> on_launch_heuristic(
-                    std::string_view name, std::string_view sql) override
-                {
-                    ++index;
-                    std::cout << "{\"phase\":\"heuristic\",\"index\":" << index
-                              << ",\"total\":" << total
-                              << ",\"matches\":" << matches
-                              << ",\"name\":\"" << name << "\"}" << std::endl;
-                    return std::string(sql);
-                }
-
-                soff::MatchDecision on_match(const soff::MatchContext& ctx) override
-                {
-                    ++matches;
-                    return {true, ctx.ratio};
-                }
-            };
-
-            CliProgressHooks progress_hooks;
-            if (progress) {
-                const auto& h = soff::diff::builtin_heuristics();
-                progress_hooks.total = h.size();
-                options.hooks = &progress_hooks;
-                std::cout << "{\"phase\":\"validate\",\"step\":\"primary\"}" << std::endl;
-            }
-
-            if (const auto error = validate_export_database(main_db, "main"); !error.empty()) {
-                throw std::runtime_error(error);
-            }
-
-            if (progress) {
-                std::cout << "{\"phase\":\"validate\",\"step\":\"secondary\"}" << std::endl;
-            }
-
-            if (const auto error = validate_export_database(diff_db, "diff"); !error.empty()) {
-                throw std::runtime_error(error);
-            }
-
-            if (progress) {
-                std::cout << "{\"phase\":\"running\"}" << std::endl;
-            }
-
-            const auto summary = soff::diff::DiffSession{options}.run_all(main_db, diff_db, out_db);
-
-            if (progress) {
-                std::cout << "{\"phase\":\"done\""
-                          << ",\"best\":" << summary.results.best
-                          << ",\"partial\":" << summary.results.partial
-                          << ",\"unreliable\":" << summary.results.unreliable
-                          << ",\"unmatched_primary\":" << summary.results.unmatched_primary
-                          << ",\"unmatched_secondary\":" << summary.results.unmatched_secondary
-                          << ",\"out\":\"" << out_db.string() << "\"}" << std::endl;
-            } else {
-                std::cout << "heuristics=" << summary.heuristics
-                          << " same_processor=" << (summary.same_processor ? "yes" : "no")
-                          << " candidates=" << summary.candidates
-                          << " accepted=" << summary.accepted
-                          << " multimatches=" << summary.multimatches
-                          << " best=" << summary.results.best
-                          << " partial=" << summary.results.partial
-                          << " unreliable=" << summary.results.unreliable
-                          << " result_multimatch=" << summary.results.multimatch
-                          << " unmatched_primary=" << summary.results.unmatched_primary
-                          << " unmatched_secondary=" << summary.results.unmatched_secondary
-                          << " row_limited=" << summary.row_limited_heuristics
-                          << " timed_out=" << summary.timed_out_heuristics
-                          << " cancelled=" << summary.cancelled_heuristics
-                          << " out=" << out_db.string() << '\n';
-            }
-            return 0;
+            return run_diff_session_cli(main_db, diff_db, out_db, options, progress);
         }
 
         if ((command == "batch-diff" || command == "parity-report") && argc >= 3) {

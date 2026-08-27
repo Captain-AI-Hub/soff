@@ -95,12 +95,27 @@ Open a `.soff` result file to browse matches interactively.
 ### CLI
 
 ```bash
-# Diff two exports
-soff_cli diff primary.sqlite secondary.sqlite -o results.soff
+# Export an IDA database (or raw binary) to a .sqlite feature database.
+# Drives IDA in headless mode; requires the Soff plugin in the IDA plugins
+# directory. IDA is located via --ida, $IDADIR, or PATH.
+soff_cli export app.i64 --out app.sqlite
+soff_cli export app.exe --ida /opt/ida --microcode
+
+# Diff two inputs end to end. Each input may be an .i64/.idb database, a raw
+# binary (both exported through headless IDA first), or a .sqlite export.
+soff_cli diff old.i64 new.i64 --out results.soff
+soff_cli diff primary.sqlite secondary.sqlite --out results.soff
+
+# Diff two existing exports directly
+soff_cli diff-db primary.sqlite secondary.sqlite --out results.soff
 
 # View summary
-soff_cli info results.soff
+soff_cli inspect-db results.soff
 ```
+
+Headless export options: `--no-decompiler`, `--microcode`,
+`--no-exclude-library-thunk`, `--ignore-small-functions`, `--from <addr>`,
+`--to <addr>`, `--export-timeout <sec>`, `--export-dir <dir>` (diff only).
 
 ---
 

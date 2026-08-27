@@ -203,9 +203,11 @@ struct soff_plugin_t : public plugmod_t
             msg("Soff: failed to register action %s\n", local_diff_action_name);
         }
 
-        // DIAPHORA_AUTO: headless export (and optional diff) on plugin load
+        // DIAPHORA_AUTO: headless export (and optional diff) once the UI loop
+        // is ready; running it here in the constructor would race the loader
+        // and the initial auto-analysis.
         if (env_value("DIAPHORA_AUTO")) {
-            run_auto_mode();
+            hook_to_notification_point(HT_UI, &soff_auto_mode_hook, this);
         }
     }
 
