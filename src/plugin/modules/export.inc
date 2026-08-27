@@ -558,7 +558,9 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
     feature.instruction_details.reserve(estimated_instructions);
     feature.call_references.reserve(16);
     feature.constants.reserve(16);
-    feature.blocks.reserve(capped_function_size);
+    // Basic blocks are bounded by the instruction count, not the byte size;
+    // reserving by bytes over-allocated massively on huge functions.
+    feature.blocks.reserve(std::max<std::size_t>(1, estimated_instructions / 4));
     feature.assembly.reserve(estimated_instructions * assembly_reserve_multiplier);
     feature.stripped_assembly.reserve(estimated_instructions * stripped_assembly_reserve_multiplier);
     feature.mnemonics.reserve(estimated_instructions * mnemonic_reserve_multiplier);
@@ -775,6 +777,55 @@ soff::FunctionFeature read_function_feature(func_t* function, ea_t imagebase, He
         }
     }
     return feature;
+}
+
+// In incremental-save mode the function features live in the output database,
+// not in snapshot.functions. Compute the callgraph prime products from the
+// database so both fresh and resumed exports get correct values.
+void compute_callgraph_primes_from_db(const std::filesystem::path& db_path, soff::ProgramSnapshot& snapshot)
+{
+    soff::db::Database database;
+    database.open(db_path);
+
+    boost::unordered_flat_set<std::string> participants;
+    for (const auto& row : database.query_rows(
+             "select distinct f.address from functions f join callgraph c on c.func_id = f.id")) {
+        if (!row.empty() && !row[0].empty()) {
+            participants.insert(row[0]);
+        }
+    }
+    for (const auto& row : database.query_rows("select distinct address from callgraph")) {
+        if (!row.empty() && !row[0].empty()) {
+            participants.insert(row[0]);
+        }
+    }
+
+    std::string cg_primes = "1";
+    std::string cg_all_primes = "1";
+    for (const auto& row : database.query_rows("select address, primes_value from functions")) {
+        if (row.size() < 2) {
+            continue;
+        }
+        const auto& prime_text = row[1];
+        if (prime_text.empty() || prime_text == "0" || prime_text == "1") {
+            continue;
+        }
+        std::uint64_t prime_val = 0;
+        try {
+            prime_val = std::stoull(prime_text);
+        } catch (...) {
+            continue;
+        }
+        if (prime_val <= 1) {
+            continue;
+        }
+        cg_all_primes = decimal_multiply(std::move(cg_all_primes), prime_val);
+        if (participants.find(row[0]) != participants.end()) {
+            cg_primes = decimal_multiply(std::move(cg_primes), prime_val);
+        }
+    }
+    snapshot.callgraph_primes = std::move(cg_primes);
+    snapshot.callgraph_all_primes = std::move(cg_all_primes);
 }
 
 ExportResult build_ida_snapshot(
@@ -996,7 +1047,10 @@ ExportResult build_ida_snapshot(
             soff::FunctionFeature feature;
             {
                 soff::perf::ScopedTimer timer("export.read_function");
-                feature = read_function_feature(function, imagebase, &hexrays, options.use_microcode, options.ignore_small_functions);
+                // ignore_small_functions must not gate decompilation: it is a
+                // size filter, but a single-block function can still be large
+                // and its pseudocode/microcode is valuable for matching.
+                feature = read_function_feature(function, imagebase, &hexrays, options.use_microcode);
             }
             // Export hook: after_export_function
             if (options.hooks != nullptr) {
@@ -1021,9 +1075,14 @@ ExportResult build_ida_snapshot(
             result.stats.batch_commits = writer->batch_commits;
         }
         update_crash_marker(
-            crash_path, function_count - 1, function_count,
-            result.stats.exported_functions, result.stats.skipped_functions,
-            current_function_ea, current_function_name, "export-complete");
+            crash_path,
+            function_count == 0 ? 0 : function_count - 1,
+            function_count,
+            result.stats.exported_functions,
+            result.stats.skipped_functions,
+            current_function_ea,
+            current_function_name,
+            "export-complete");
         hide_wait_box();
     } catch (...) {
         if (writer) {
@@ -1095,7 +1154,13 @@ ExportResult build_ida_snapshot(
     export_local_types(snapshot);
 
     // Compute callgraph primes after all functions are collected
-    {
+    if (incremental_save) {
+        // In incremental mode the features live in the output database, not
+        // in snapshot.functions, so the primes must be computed from the
+        // database; snapshot.functions is empty here and iterating it would
+        // always store "1"/"1".
+        compute_callgraph_primes_from_db(incremental_output_path, snapshot);
+    } else {
         boost::unordered_flat_set<soff::Address> callgraph_participants;
         for (const auto& f : snapshot.functions) {
             for (const auto& ref : f.call_references) {
@@ -1148,6 +1213,79 @@ std::string export_summary_text(const ExportResult& result, const std::filesyste
     std::size_t microcode_nonempty = 0;
     std::size_t clean_microcode_nonempty = 0;
     std::size_t microcode_spp_nontrivial = 0;
+
+    if (field_count == 0 && !output_path.empty() && std::filesystem::exists(output_path)) {
+        // Incremental export: the features were written straight to the
+        // database, so compute the fill statistics from there instead of
+        // reporting a misleading 0/0.
+        try {
+            soff::db::Database database;
+            database.open(output_path);
+            const auto rows = database.query_rows(
+                "select count(*), "
+                "sum(length(coalesce(names, '')) > 0 and coalesce(names, '') != '[]'), "
+                "sum(length(coalesce(prototype, '')) > 0), "
+                "sum(cast(coalesce(md_index, '0') as real) > 0), "
+                "sum(length(coalesce(switches, '')) > 0 and coalesce(switches, '') != '[]'), "
+                "sum(coalesce(strongly_connected, 0) > 0), "
+                "sum(coalesce(loops, 0) > 0), "
+                "sum(length(coalesce(pseudocode, '')) > 0), "
+                "sum(length(coalesce(clean_pseudo, '')) > 0), "
+                "sum(length(coalesce(pseudocode_primes, '')) > 0), "
+                "sum(length(coalesce(microcode, '')) > 0), "
+                "sum(length(coalesce(clean_microcode, '')) > 0), "
+                "sum(length(coalesce(microcode_spp, '')) > 0 and coalesce(microcode_spp, '') != '1') "
+                "from functions");
+            if (!rows.empty() && rows.front().size() >= 13) {
+                const auto& row = rows.front();
+                const auto count = static_cast<std::size_t>(std::stoull(row[0]));
+                names_nonempty = static_cast<std::size_t>(std::stoull(row[1]));
+                prototypes = static_cast<std::size_t>(std::stoull(row[2]));
+                md_index_nonzero = static_cast<std::size_t>(std::stoull(row[3]));
+                switches_nonempty = static_cast<std::size_t>(std::stoull(row[4]));
+                strongly_connected_nonzero = static_cast<std::size_t>(std::stoull(row[5]));
+                loops_nonzero = static_cast<std::size_t>(std::stoull(row[6]));
+                pseudocode_nonempty = static_cast<std::size_t>(std::stoull(row[7]));
+                clean_pseudo_nonempty = static_cast<std::size_t>(std::stoull(row[8]));
+                pseudocode_primes_nonempty = static_cast<std::size_t>(std::stoull(row[9]));
+                microcode_nonempty = static_cast<std::size_t>(std::stoull(row[10]));
+                clean_microcode_nonempty = static_cast<std::size_t>(std::stoull(row[11]));
+                microcode_spp_nontrivial = static_cast<std::size_t>(std::stoull(row[12]));
+
+                std::ostringstream db_out;
+                db_out << "Output: " << output_path.string() << '\n'
+                    << "Functions: " << result.stats.exported_functions << "/" << result.stats.total_functions
+                    << " exported, skipped=" << result.stats.skipped_functions
+                    << ", resumed=" << result.stats.resumed_functions
+                    << ", batches=" << result.stats.batch_commits
+                    << ", seconds=" << std::fixed << std::setprecision(3) << result.stats.export_seconds << '\n'
+                    << "Field fill: names=" << names_nonempty << "/" << count
+                    << " prototype=" << prototypes << "/" << count
+                    << " md_index=" << md_index_nonzero << "/" << count
+                    << " switches=" << switches_nonempty << "/" << count
+                    << " scc=" << strongly_connected_nonzero << "/" << count
+                    << " loops=" << loops_nonzero << "/" << count
+                    << " pseudo=" << pseudocode_nonempty << "/" << count
+                    << " clean_pseudo=" << clean_pseudo_nonempty << "/" << count
+                    << " pseudocode_primes=" << pseudocode_primes_nonempty << "/" << count
+                    << " microcode=" << microcode_nonempty << "/" << count
+                    << " clean_microcode=" << clean_microcode_nonempty << "/" << count
+                    << " microcode_spp=" << microcode_spp_nontrivial << "/" << count << '\n';
+                if (!result.stats.skip_reasons.empty()) {
+                    db_out << "Skip reasons:";
+                    for (const auto& [reason, reason_count] : result.stats.skip_reasons) {
+                        db_out << " " << reason << "=" << reason_count;
+                    }
+                    db_out << '\n';
+                }
+                db_out << "Crash marker: cleared after successful export";
+                return db_out.str();
+            }
+        } catch (...) {
+            // Fall through to the in-memory summary.
+        }
+    }
+
     for (const auto& function : result.snapshot.functions) {
         if (!function.names.empty() && function.names != "[]") {
             ++names_nonempty;

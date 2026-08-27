@@ -12,7 +12,7 @@ soff/
 │   └── ui/                   html_diff, import_plan, line_diff
 ├── src/
 │   ├── analysis/model.cpp    Snapshot validation
-│   ├── cli/main.cpp          soff_cli binary (diff-db, export tools)
+│   ├── cli/main.cpp          soff_cli binary (export/diff i64 pipelines, diff-db, inspect tools)
 │   ├── core/version.cpp      Version string
 │   ├── db/
 │   │   ├── database.cpp      SQLite wrapper (open, execute, query)
@@ -83,17 +83,24 @@ Desktop Viewer (desktop/)
 5. Stripped binary fast path (99%+ address+hash match → skip heuristics)
 6. find_same_name (name + ratio >= 0.8)
 7. Patchdiff fast path (90%+ name match → skip heuristics)
-8. SQL heuristics (50 in order: best → partial → unreliable)
-9. Propagation (5 passes, iterative until convergence)
-10. resolve_multimatches
-11. ML model filter (optional)
-12. final_pass_unmatched
-13. Save results
+8. SQL heuristics (51 in order: best → partial → unreliable)
+9. Fast-path remaining pass (only after 5/7): same-address pairing for
+   stripped binaries, brute-force of leftover anonymous pairs for patchdiff
+   (Diaphora parity: "Same binary with symbols stripped" /
+   "Renamed or anonymous function match in patch diffing session")
+10. Propagation (5 passes incl. call-reference, iterative until convergence)
+11. resolve_multimatches
+12. ML model filter (optional)
+13. final_pass_unmatched
+14. Save results
 
 ## Known Gaps (vs BinDiff)
 
-- No basic-block-level matching (data exists in `blocks` + `bb_instructions`)
-- No disambiguation (feature collision → first match wins)
-- No call-reference propagation (BinDiff matches callees by position)
+- BB-level matching is post-hoc ratio refinement (session.cpp), not a
+  standalone matching step like BinDiff's flow-graph instruction matching
+- No cross-heuristic disambiguation: the Hungarian assignment
+  (matching_assignment.cpp) resolves within one heuristic's candidate set;
+  competing candidates across heuristics still resolve by order
 - Text ratio (bag-of-lines) instead of structural similarity
-- MD Index underutilized (only as ratio boost, not as primary match key)
+- Propagation passes (diffing/constants/call-reference) still run N+1 SQL
+  queries instead of FunctionCache lookups (see TODOs in propagation.cpp)

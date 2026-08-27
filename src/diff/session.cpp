@@ -6,6 +6,7 @@
 #include "soff/db/repository.hpp"
 #include "soff/diff/bb_matching.hpp"
 #include "soff/diff/function_cache.hpp"
+#include "soff/diff/matching_assignment.hpp"
 #include "soff/diff/ml_model.hpp"
 #include "soff/diff/propagation.hpp"
 
@@ -324,6 +325,160 @@ std::vector<db::HeuristicStat> convert_stats(const std::vector<SqlHeuristicStats
     return out;
 }
 
+// Ratio between two unmatched functions for the fast-path remaining pass.
+double remaining_pair_ratio(
+    const CachedFunction& primary,
+    const CachedFunction& secondary,
+    bool same_processor)
+{
+    return same_processor
+        ? candidate_text_ratio(
+            "", "", "", "",
+            primary.clean_assembly, secondary.clean_assembly,
+            primary.clean_pseudo, secondary.clean_pseudo)
+        : candidate_text_ratio(
+            "", "", "", "",
+            "", "", primary.clean_pseudo, secondary.clean_pseudo);
+}
+
+// The stripped/patchdiff fast paths skip the SQL heuristics, which would
+// otherwise leave the changed functions -- usually the interesting ones --
+// unmatched. This pass pairs the leftovers explicitly, mirroring Diaphora's
+// same-address pairing ("Same binary with symbols stripped") and its
+// find_remaining_functions() brute force for patch diffing.
+std::size_t match_remaining_after_fast_path(
+    const FunctionCache& primary_cache,
+    const FunctionCache& secondary_cache,
+    boost::unordered_flat_set<Address>& matched_primary,
+    boost::unordered_flat_set<Address>& matched_secondary,
+    std::vector<db::ResultMatch>& matches,
+    bool same_processor,
+    bool patch_mode,
+    const DiffConfig& config)
+{
+    std::vector<const CachedFunction*> unmatched_primary;
+    std::vector<const CachedFunction*> unmatched_secondary;
+    for (const auto& [address, function] : primary_cache.by_address) {
+        if (matched_primary.find(address) == matched_primary.end()) {
+            unmatched_primary.push_back(&function);
+        }
+    }
+    for (const auto& [address, function] : secondary_cache.by_address) {
+        if (matched_secondary.find(address) == matched_secondary.end()) {
+            unmatched_secondary.push_back(&function);
+        }
+    }
+    const auto by_address_asc = [](const CachedFunction* left, const CachedFunction* right) {
+        return left->address < right->address;
+    };
+    std::sort(unmatched_primary.begin(), unmatched_primary.end(), by_address_asc);
+    std::sort(unmatched_secondary.begin(), unmatched_secondary.end(), by_address_asc);
+
+    int line = 0;
+    for (const auto& match : matches) {
+        line = std::max(line, match.line + 1);
+    }
+    std::size_t added = 0;
+
+    const auto emit_match = [&](const CachedFunction& primary,
+                                const CachedFunction& secondary,
+                                double ratio,
+                                db::ResultKind kind,
+                                const char* description) {
+        db::ResultMatch match;
+        match.kind = kind;
+        match.line = line++;
+        match.primary = primary.address;
+        match.primary_name = primary.name;
+        match.secondary = secondary.address;
+        match.secondary_name = secondary.name;
+        match.ratio = ratio;
+        match.primary_nodes = primary.nodes;
+        match.secondary_nodes = secondary.nodes;
+        match.description = description;
+        matches.push_back(std::move(match));
+        ++added;
+    };
+
+    if (!patch_mode) {
+        // Stripped binary: identical layout, pair the changed functions that
+        // still share the same address.
+        boost::unordered_flat_map<Address, const CachedFunction*> secondary_by_address;
+        secondary_by_address.reserve(unmatched_secondary.size());
+        for (const auto* function : unmatched_secondary) {
+            secondary_by_address.emplace(function->address, function);
+        }
+        for (const auto* primary : unmatched_primary) {
+            const auto found = secondary_by_address.find(primary->address);
+            if (found == secondary_by_address.end()) {
+                continue;
+            }
+            const auto* secondary = found->second;
+            const double ratio = remaining_pair_ratio(*primary, *secondary, same_processor);
+            if (ratio < config.default_partial_ratio) {
+                continue;
+            }
+            emit_match(
+                *primary,
+                *secondary,
+                ratio,
+                ratio >= 1.0 ? db::ResultKind::best : db::ResultKind::partial,
+                "Same binary with symbols stripped");
+            matched_primary.insert(primary->address);
+            matched_secondary.insert(secondary->address);
+        }
+        return added;
+    }
+
+    // Patch diffing with symbols: brute-force the few remaining pairs and
+    // resolve them one-to-one. As in Diaphora, only anonymous primaries are
+    // considered; named leftovers are handled by the diffing propagation.
+    std::vector<WeightedMatchCandidate> candidates;
+    std::vector<std::pair<const CachedFunction*, const CachedFunction*>> candidate_pairs;
+    for (const auto* primary : unmatched_primary) {
+        if (primary->nodes < 3) {
+            continue;
+        }
+        if (config.ignore_sub_function_names
+            && primary->name.compare(0, 4, "sub_") != 0) {
+            continue;
+        }
+        for (const auto* secondary : unmatched_secondary) {
+            if (secondary->nodes < 3) {
+                continue;
+            }
+            const double ratio = remaining_pair_ratio(*primary, *secondary, same_processor);
+            if (ratio < config.speedup_patch_diff_renamed_function_min_ratio) {
+                continue;
+            }
+            candidates.push_back({primary->address, secondary->address, ratio});
+            candidate_pairs.emplace_back(primary, secondary);
+        }
+    }
+    const auto resolution = resolve_weighted_matches(candidates);
+    for (const auto index : resolution.multimatches) {
+        const auto& candidate = candidates[index];
+        emit_match(
+            *candidate_pairs[index].first,
+            *candidate_pairs[index].second,
+            candidate.ratio,
+            db::ResultKind::multimatch,
+            "Renamed or anonymous function match in patch diffing session");
+    }
+    for (const auto index : resolution.selected) {
+        const auto& candidate = candidates[index];
+        emit_match(
+            *candidate_pairs[index].first,
+            *candidate_pairs[index].second,
+            candidate.ratio,
+            candidate.ratio >= 1.0 ? db::ResultKind::best : db::ResultKind::partial,
+            "Renamed or anonymous function match in patch diffing session");
+        matched_primary.insert(candidate.primary);
+        matched_secondary.insert(candidate.secondary);
+    }
+    return added;
+}
+
 } // namespace
 
 void resolve_multimatches_for_testing(std::vector<db::ResultMatch>& matches)
@@ -390,9 +545,30 @@ std::vector<db::ResultMatch> find_md_index_matches(
         auto [it, inserted] = primary_by_md.emplace(function.md_index, address);
         if (!inserted) duplicate_md.emplace(function.md_index);
     }
-    std::vector<db::ResultMatch> matches;
+    // Uniqueness must hold on both sides; a value duplicated in the secondary
+    // cannot be matched reliably either. Iteration is address-ordered so the
+    // outcome is deterministic.
+    boost::unordered_flat_map<std::string, std::size_t> secondary_md_counts;
     for (const auto& [secondary_address, secondary] : secondary_cache.by_address) {
+        if (!secondary.md_index.empty()) {
+            ++secondary_md_counts[secondary.md_index];
+        }
+    }
+    std::vector<const CachedFunction*> secondaries;
+    secondaries.reserve(secondary_cache.by_address.size());
+    for (const auto& [secondary_address, secondary] : secondary_cache.by_address) {
+        secondaries.push_back(&secondary);
+    }
+    std::sort(secondaries.begin(), secondaries.end(), [](const auto* left, const auto* right) {
+        return left->address < right->address;
+    });
+
+    std::vector<db::ResultMatch> matches;
+    for (const auto* secondary_ptr : secondaries) {
+        const auto& secondary = *secondary_ptr;
+        const auto secondary_address = secondary.address;
         if (secondary.md_index.empty() || duplicate_md.find(secondary.md_index) != duplicate_md.end()) continue;
+        if (secondary_md_counts.find(secondary.md_index)->second != 1) continue;
         const auto primary = primary_by_md.find(secondary.md_index);
         if (primary == primary_by_md.end()) continue;
         const auto primary_function = primary_cache.by_address.find(primary->second);
@@ -588,6 +764,25 @@ DiffSessionSummary run_session(
 
     if (!exact_only) {
         cleanup_matches(results.matches, matched_primary, matched_secondary);
+    }
+
+    // The fast paths skipped the SQL heuristics; pair up the remaining
+    // (changed) functions explicitly, otherwise the functions that actually
+    // differ between the two binaries would stay unmatched.
+    if (!exact_only && (is_stripped_fast_path || is_patchdiff_fast_path)) {
+        const auto added = match_remaining_after_fast_path(
+            primary_cache,
+            secondary_cache,
+            matched_primary,
+            matched_secondary,
+            results.matches,
+            sql_options.same_processor,
+            is_patchdiff_fast_path,
+            options.config);
+        soff::perf::add_counter("diff.fast_path.remaining_matches", added);
+        if (added != 0) {
+            cleanup_matches(results.matches, matched_primary, matched_secondary);
+        }
     }
 
     // Fixed-point iteration: heuristics -> propagation -> repeat until convergence

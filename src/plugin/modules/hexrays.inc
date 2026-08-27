@@ -95,7 +95,7 @@ std::string local_type_definition(uint32 ordinal)
     ordinals.push_back(ordinal);
     string_text_sink_t sink;
     const int exported = print_decls(sink, nullptr, &ordinals, PDF_DEF_FWD | PDF_DEF_BASE);
-    return exported == 0 ? std::string() : trim_copy(std::move(sink.text));
+    return exported <= 0 ? std::string() : trim_copy(std::move(sink.text));
 }
 
 std::string local_type_kind(std::string_view definition)
@@ -203,9 +203,9 @@ std::string clean_pseudocode_text(std::string text)
     for (const auto* replacement : replacements) {
         text = regex_replace_icase(text, std::string(replacement) + "[a-f0-9A-F]+", std::string(replacement) + "XXXX");
     }
-    text = regex_replace_icase(text, R"(v[0-9]+)", "vXXX");
-    text = regex_replace_icase(text, R"(a[0-9]+)", "aXXX");
-    text = regex_replace_icase(text, R"(arg_[0-9]+)", "aXXX");
+    text = regex_replace_icase(text, R"(\bv[0-9]+\b)", "vXXX");
+    text = regex_replace_icase(text, R"(\ba[0-9]+\b)", "aXXX");
+    text = regex_replace_icase(text, R"(\barg_[0-9]+)", "aXXX");
     return text;
 }
 

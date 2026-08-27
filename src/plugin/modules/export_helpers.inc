@@ -109,6 +109,33 @@ std::string json_address_array(const std::vector<soff::Address>& values)
     return out.str();
 }
 
+void append_json_escaped(std::ostringstream& out, std::string_view value)
+{
+    out << '"';
+    for (const char ch : value) {
+        switch (ch) {
+        case '"': out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            // Control characters must be escaped for the JSON to be valid.
+            if (static_cast<unsigned char>(ch) < 0x20) {
+                char buffer[8];
+                std::snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned>(ch));
+                out << buffer;
+            } else {
+                out << ch;
+            }
+            break;
+        }
+    }
+    out << '"';
+}
+
 std::string json_string_array(const std::set<std::string>& values)
 {
     std::ostringstream out;
@@ -119,14 +146,7 @@ std::string json_string_array(const std::set<std::string>& values)
             out << ',';
         }
         first = false;
-        out << '"';
-        for (const char ch : value) {
-            if (ch == '"' || ch == '\\') {
-                out << '\\';
-            }
-            out << ch;
-        }
-        out << '"';
+        append_json_escaped(out, value);
     }
     out << ']';
     return out.str();
@@ -134,14 +154,7 @@ std::string json_string_array(const std::set<std::string>& values)
 
 void append_json_string(std::ostringstream& out, std::string_view value)
 {
-    out << '"';
-    for (const char ch : value) {
-        if (ch == '"' || ch == '\\') {
-            out << '\\';
-        }
-        out << ch;
-    }
-    out << '"';
+    append_json_escaped(out, value);
 }
 
 std::string forced_operands_json(ea_t ea, const insn_t& instruction)

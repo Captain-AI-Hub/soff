@@ -71,7 +71,6 @@ public:
         const char* names[] = {
             "sqlite3.dll",
             "libsqlite3-0.dll",
-            "E:\\msys2\\clang64\\bin\\libsqlite3-0.dll",
         };
         if (handle_ == nullptr) {
             for (const char* name : names) {

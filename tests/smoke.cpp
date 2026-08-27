@@ -1041,6 +1041,9 @@ int main(int argc, char** argv)
     extern void test_bb_matching_regressions();
     test_bb_matching_regressions();
 
+    extern void test_fast_path_remaining();
+    test_fast_path_remaining();
+
     extern void test_line_diff();
     test_line_diff();
 

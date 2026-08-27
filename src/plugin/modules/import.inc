@@ -21,38 +21,6 @@ bool apply_pseudocode_comment(ea_t address, std::uint64_t pseudoitp, const std::
     return true;
 }
 
-void import_global_variables(func_t* function, soff::Address /*secondary_addr*/, ImportApplySummary& summary)
-{
-    // Scan data references from the function and rename globals that have
-    // meaningful names in the secondary (imported via the function's xrefs)
-    xrefblk_t xref;
-    for (bool has = xref.first_from(function->start_ea, XREF_DATA);
-         has;
-         has = xref.next_from()) {
-        if (xref.iscode) continue;
-        const ea_t target = xref.to;
-        // Skip if target is inside a function (local variable, not global)
-        if (get_func(target) != nullptr) continue;
-        // Skip if already has a meaningful name
-        qstring existing_name;
-        if (get_name(&existing_name, target) > 0 && existing_name.length() > 0) {
-            const auto sv = std::string_view(existing_name.c_str());
-            if (sv.substr(0, 4) != "unk_" && sv.substr(0, 5) != "byte_"
-                && sv.substr(0, 5) != "word_" && sv.substr(0, 6) != "dword_"
-                && sv.substr(0, 6) != "qword_") {
-                continue; // already named
-            }
-        }
-        // Try to get name from debug info
-        qstring demangled;
-        if (get_demangled_name(&demangled, target, 0, GN_SHORT) > 0 && demangled.length() > 0) {
-            if (set_name(target, demangled.c_str(), SN_CHECK | SN_NOWARN)) {
-                ++summary.global_variables;
-            }
-        }
-    }
-}
-
 ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
 {
     ImportApplySummary summary;
@@ -82,10 +50,6 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
             } else {
                 ++summary.failed;
             }
-            // Import global variable names referenced by this function
-            if (item.secondary_address != 0) {
-                import_global_variables(function, item.secondary_address, summary);
-            }
             break;
         }
         case soff::ui::ImportOperation::apply_prototype:
@@ -103,7 +67,11 @@ ImportApplySummary apply_import_plan(const soff::ui::ImportPlan& plan)
             }
             break;
         case soff::ui::ImportOperation::set_function_flags:
-            function->flags = static_cast<decltype(function->flags)>(item.numeric_value);
+            // Only import user-meaningful bits; overwriting the whole flags
+            // word would clobber analysis-computed state (frame, SP, far...).
+            function->flags = static_cast<decltype(function->flags)>(
+                (function->flags & ~FUNC_NORET)
+                | (static_cast<decltype(function->flags)>(item.numeric_value) & FUNC_NORET));
             if (update_func(function)) {
                 ++summary.function_flags;
             } else {

@@ -137,7 +137,8 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
     mba_ranges_t ranges(function);
     hexrays_failure_t failure;
     soff::perf::add_counter("export.hexrays.microcode.attempt");
-    mba_t* mba = gen_microcode(ranges, &failure, nullptr, DECOMP_WARNINGS, MMAT_GENERATED);
+    // RAII: any exception while collecting blocks would otherwise leak the mba.
+    std::unique_ptr<mba_t> mba(gen_microcode(ranges, &failure, nullptr, DECOMP_WARNINGS, MMAT_GENERATED));
     if (mba == nullptr) {
         ++hexrays.microcode_failures;
         record_hexrays_failure(hexrays, failure);
@@ -150,9 +151,8 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
 
     mba->build_graph();
     for (int i = 0; i < mba->qty; ++i) {
-        if (i == 0) {
-            continue;
-        }
+        // Serial 0 is the entry block and contains real instructions; only the
+        // BLT_STOP sentinel is excluded.
         const mblock_t* block = mba->get_mblock(static_cast<uint>(i));
         if (block == nullptr || block->type == BLT_STOP) {
             continue;
@@ -196,7 +196,7 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
 
         for (int successor_index = 0; successor_index < block->nsucc(); ++successor_index) {
             const auto successor = block->succ(successor_index);
-            if (successor <= 0 || successor >= mba->qty) {
+            if (successor < 0 || successor >= mba->qty) {
                 continue;
             }
             const mblock_t* successor_block = mba->get_mblock(static_cast<uint>(successor));
@@ -208,7 +208,6 @@ void extract_microcode_features(func_t* function, soff::FunctionFeature& feature
 
         feature.microcode_blocks.push_back(std::move(micro_block));
     }
-    delete mba;
 
     std::set<std::string> unique_mnemonics;
     std::string microcode;

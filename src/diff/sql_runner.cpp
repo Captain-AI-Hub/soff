@@ -205,41 +205,6 @@ CandidateRow parse_candidate(const db::QueryRow& row)
     return candidate;
 }
 
-double numeric_similarity(int left, int right)
-{
-    if (left == right) {
-        return 1.0;
-    }
-    if (left <= 0 || right <= 0) {
-        return 0.0;
-    }
-    const auto low = static_cast<double>(std::min(left, right));
-    const auto high = static_cast<double>(std::max(left, right));
-    return low / high;
-}
-
-double graph_metric_ratio(const CandidateRow& candidate)
-{
-    const double values[] = {
-        numeric_similarity(candidate.primary_nodes, candidate.secondary_nodes),
-        numeric_similarity(candidate.primary_edges, candidate.secondary_edges),
-        numeric_similarity(candidate.primary_indegree, candidate.secondary_indegree),
-        numeric_similarity(candidate.primary_outdegree, candidate.secondary_outdegree),
-        numeric_similarity(candidate.primary_instructions, candidate.secondary_instructions),
-        numeric_similarity(candidate.primary_cc, candidate.secondary_cc),
-        numeric_similarity(candidate.primary_strongly_connected, candidate.secondary_strongly_connected),
-        numeric_similarity(candidate.primary_loops, candidate.secondary_loops),
-        numeric_similarity(candidate.primary_constants_count, candidate.secondary_constants_count),
-        numeric_similarity(candidate.primary_size, candidate.secondary_size),
-    };
-
-    double total = 0.0;
-    for (const auto value : values) {
-        total += value;
-    }
-    return total / static_cast<double>(sizeof(values) / sizeof(values[0]));
-}
-
 double equal_non_empty_ratio(const std::string& left, const std::string& right)
 {
     return !left.empty() && left == right ? 1.0 : 0.0;
@@ -292,10 +257,20 @@ double deep_ratio_bonus(db::Database& database, const CandidateRow& candidate, c
             soff::perf::add_counter("ratio.deep_bonus.cache_hit");
             const auto& left = primary->second;
             const auto& right = secondary->second;
+            // Same magnitudes as the SQL fallback below (Diaphora deep_ratio
+            // parity): tiny nudges that only break multimatch ties.
             double bonus = 0.0;
-            if (!left.source_file.empty() && left.source_file == right.source_file) bonus += 0.05;
-            if (!left.pseudocode_primes.empty() && left.pseudocode_primes == right.pseudocode_primes) bonus += 0.10;
-            if (!left.constants.empty() && left.constants == right.constants) bonus += 0.05;
+            if (!left.source_file.empty() && left.source_file == right.source_file) bonus += 0.001;
+            if (!left.pseudocode_primes.empty() && left.pseudocode_primes == right.pseudocode_primes) bonus += 0.001;
+            if (candidate.primary_indegree == candidate.secondary_indegree && candidate.primary_indegree != 0) bonus += 0.001;
+            if (candidate.primary_outdegree == candidate.secondary_outdegree && candidate.primary_outdegree != 0) bonus += 0.001;
+            if (candidate.primary_cc == candidate.secondary_cc && candidate.primary_cc != 0) bonus += 0.001;
+            if (!left.constants.empty() && left.constants != "[]" && !right.constants.empty()) {
+                const auto common = intersection_size(
+                    parse_jsonish_array_values(left.constants),
+                    parse_jsonish_array_values(right.constants));
+                bonus += static_cast<double>(common) * (options.same_processor ? 0.006 : 0.008);
+            }
             return std::min(0.20, bonus);
         }
     }
@@ -367,8 +342,8 @@ double compute_ratio_fast(const CandidateRow& candidate)
 
     double v4 = 0.0;
     if (candidate.md1 == candidate.md2 && candidate.md1 > 0.0) {
-        const double avg = (v1 + v2 + v3) / 3.0;
-        v4 = std::min(avg + 0.1, 1.0);
+        // Diaphora parity: a shared MD index lifts the average considerably.
+        v4 = std::min((v1 + v2 + v3 + 3.0) / 5.0, 1.0);
     }
     const double v5 = candidate_text_ratio("", "", "", "", candidate.stripped_micro1, candidate.stripped_micro2, "", "");
     if (v5 == 1.0) {
@@ -716,8 +691,7 @@ SqlHeuristicRunResult SqlHeuristicRunner::run_all(db::Database& database, const 
                 ratio = 1.0;
             }
 
-            if (heuristic.ratio_mode != RatioMode::no_false_positives
-                && ratio < 1.0 && ratio >= minimum_ratio - 0.05) {
+            if (heuristic.ratio_mode != RatioMode::no_false_positives && ratio < 1.0) {
                 double bonus = 0.0;
                 {
                     soff::perf::ScopedTimer timer("ratio.deep_bonus");
