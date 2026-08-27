@@ -7,6 +7,7 @@
 #include "soff/diff/session.hpp"
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -1309,6 +1310,42 @@ int main(int argc, char** argv)
         if (argc == 1) {
             print_usage();
             return 0;
+        }
+
+        // Tolerate global-style options placed before the subcommand, e.g.
+        // `soff_cli --ida /opt/ida export a.i64`: hoist them behind the
+        // subcommand so the subcommand parsers see their usual layout.
+        std::vector<std::string> args(argv, argv + argc);
+        static const std::array<std::string_view, 11> options_with_values = {
+            "--ida", "--out", "--export-dir", "--export-timeout", "--from", "--to",
+            "--ml-model", "--max-rows", "--timeout", "--top", "--root",
+        };
+        std::vector<std::string> hoisted;
+        std::size_t command_index = 1;
+        while (command_index < args.size() && args[command_index].rfind("--", 0) == 0) {
+            const auto& option = args[command_index];
+            const auto takes_value = std::find(
+                options_with_values.begin(), options_with_values.end(), option)
+                != options_with_values.end();
+            hoisted.push_back(option);
+            ++command_index;
+            if (takes_value && command_index < args.size()) {
+                hoisted.push_back(args[command_index]);
+                ++command_index;
+            }
+        }
+        std::vector<char*> normalized_argv;
+        if (command_index > 1 && command_index < args.size()) {
+            normalized_argv.push_back(argv[0]);
+            normalized_argv.push_back(args[command_index].data());
+            for (std::size_t i = command_index + 1; i < args.size(); ++i) {
+                normalized_argv.push_back(args[i].data());
+            }
+            for (auto& option : hoisted) {
+                normalized_argv.push_back(option.data());
+            }
+            argv = normalized_argv.data();
+            argc = static_cast<int>(normalized_argv.size());
         }
 
         const std::string_view command(argv[1]);
