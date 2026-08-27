@@ -2,7 +2,7 @@ param(
     [ValidateSet("release", "debug")]
     [string]$Mode = "release",
     [switch]$IdaPlugin,
-    [string]$IdaSdk = "ida-sdk-93-main/src",
+    [string]$IdaSdk = "ida-sdk-94-main/src",
     [switch]$SkipSoff,
     [switch]$SkipDesktop,
     [string]$DesktopBundles = ""

@@ -3,7 +3,7 @@ set -eu
 
 MODE="release"
 IDA_PLUGIN=0
-IDA_SDK="ida-sdk-93-main/src"
+IDA_SDK="ida-sdk-94-main/src"
 SKIP_SOFF=0
 SKIP_DESKTOP=0
 DESKTOP_BUNDLES=""
@@ -41,7 +41,7 @@ Usage: scripts/build.sh [options]
 Options:
   --mode release|debug    Build mode, default: release
   --ida-plugin           Also build soff_ida
-  --ida-sdk PATH         IDA SDK src path, default: ida-sdk-93-main/src
+  --ida-sdk PATH         IDA SDK src path, default: ida-sdk-94-main/src
   --skip-soff            Skip xmake build
   --skip-desktop         Skip desktop build
   --desktop-bundles LIST Build specific Tauri bundles, e.g. deb, nsis, dmg
