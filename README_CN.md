@@ -113,7 +113,8 @@ soff_cli inspect-db results.soff
 
 无头导出选项：`--no-decompiler`、`--microcode`、
 `--no-exclude-library-thunk`、`--ignore-small-functions`、`--from <addr>`、
-`--to <addr>`、`--export-timeout <sec>`、`--export-dir <dir>`（仅 diff）。
+`--to <addr>`、`--export-dir <dir>`（仅 diff）。`--export-timeout <sec>`
+只是可选的保护上限——默认不设超时，会一直等 IDA 跑完（大数据库推荐默认行为）。
 
 ---
 

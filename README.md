@@ -115,7 +115,9 @@ soff_cli inspect-db results.soff
 
 Headless export options: `--no-decompiler`, `--microcode`,
 `--no-exclude-library-thunk`, `--ignore-small-functions`, `--from <addr>`,
-`--to <addr>`, `--export-timeout <sec>`, `--export-dir <dir>` (diff only).
+`--to <addr>`, `--export-dir <dir>` (diff only). `--export-timeout <sec>`
+is an optional safety cap — by default the CLI waits for IDA indefinitely,
+which is what you want for large databases.
 
 ---
 

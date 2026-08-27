@@ -67,6 +67,7 @@ void print_usage()
            "             [--export-timeout <sec>] [--no-decompiler] [--microcode]\n"
            "             [--no-exclude-library-thunk] [--ignore-small-functions]\n"
            "             [--from <addr>] [--to <addr>]\n"
+           "             (no --export-timeout = wait for IDA indefinitely)\n"
         << "  soff_cli diff <primary.i64|.sqlite|binary> <secondary.i64|.sqlite|binary> --out <result.soff>\n"
            "             [--ida <dir|exe>] [--export-dir <dir>] [--export-timeout <sec>]\n"
            "             [--no-decompiler] [--microcode] [--no-exclude-library-thunk]\n"
