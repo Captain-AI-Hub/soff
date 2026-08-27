@@ -590,6 +590,14 @@ void run_auto_mode()
         return;
     }
 
+    // Marker read by the soff_cli -S watchdog to distinguish "plugin missing"
+    // from "export in progress"; removed on every exit path below.
+    const std::filesystem::path started_marker = export_path.string() + ".started";
+    {
+        std::ofstream marker(started_marker, std::ios::binary | std::ios::trunc);
+        marker << "soff headless export started\n";
+    }
+
     // Export
     ExportOptions options;
     options.use_decompiler = true;
@@ -602,6 +610,8 @@ void run_auto_mode()
             export_path.string().c_str());
     } catch (const std::exception& e) {
         msg("Soff: DIAPHORA_AUTO: export failed: %s\n", e.what());
+        std::error_code marker_error;
+        std::filesystem::remove(started_marker, marker_error);
         qexit(1);
         return;
     }
@@ -638,6 +648,8 @@ void run_auto_mode()
     }
 
     msg("Soff: DIAPHORA_AUTO: done, requesting exit\n");
+    std::error_code marker_error;
+    std::filesystem::remove(started_marker, marker_error);
     qexit(0);
 }
 

@@ -1043,20 +1043,31 @@ bool parse_headless_export_option(int& i, int argc, char** argv, HeadlessExportO
     return true;
 }
 
-// IDAPython fallback executed via -S. When the Soff plugin handled the export
-// the output file already exists and this script is a no-op; otherwise it
-// fails fast instead of leaving IDA interactive forever.
+// IDAPython watchdog executed via -S. The plugin's DIAPHORA_AUTO hook (armed
+// on ui_ready_to_run) performs the actual export; this script only guarantees
+// IDA exits when the plugin is missing. It registers a UI timer instead of
+// checking synchronously, because -S scripts run on the UI thread *before*
+// ui_ready_to_run fires — a synchronous check would kill a healthy export.
+// The plugin writes a "<out>.started" marker when the export begins, so the
+// watchdog can tell "plugin missing" from "export in progress".
 std::filesystem::path write_headless_guard_script()
 {
     static const char script[] =
         "import os\n"
-        "import idaapi\n"
         "import idc\n"
-        "idaapi.auto_wait()\n"
+        "import ida_kernwin\n"
         "_out = os.environ.get(\"DIAPHORA_EXPORT_FILE\", \"\")\n"
-        "if not _out or not os.path.exists(_out):\n"
-        "    idc.msg(\"Soff: headless export produced no output; is the Soff plugin installed in the IDA plugins directory?\\n\")\n"
-        "    idc.qexit(3)\n";
+        "_started = _out + \".started\"\n"
+        "def _soff_watchdog():\n"
+        "    if os.path.exists(_out):\n"
+        "        idc.qexit(0)\n"
+        "        return -1\n"
+        "    if os.path.exists(_started):\n"
+        "        return 5000\n"
+        "    idc.msg(\"Soff: headless export did not start; is the Soff plugin installed in the IDA plugins directory?\\n\")\n"
+        "    idc.qexit(3)\n"
+        "    return -1\n"
+        "ida_kernwin.register_timer(3000, _soff_watchdog)\n";
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto path = std::filesystem::temp_directory_path()
         / ("soff_headless_guard_" + std::to_string(nonce) + ".py");
@@ -1089,6 +1100,8 @@ std::filesystem::path export_via_ida(
     // A stale export must never mask a failed run.
     std::error_code remove_error;
     std::filesystem::remove(output, remove_error);
+    // Drop any stale watchdog marker from a previous crashed run as well.
+    std::filesystem::remove(output.string() + ".started", remove_error);
 
     ScopedEnvironment env;
     env.set("DIAPHORA_AUTO", "1");
@@ -1139,7 +1152,8 @@ std::filesystem::path export_via_ida(
 std::filesystem::path ensure_sqlite_input(
     const std::filesystem::path& input,
     const std::filesystem::path& export_dir,
-    const HeadlessExportOptions& options)
+    const HeadlessExportOptions& options,
+    const std::string& name_suffix = "")
 {
     if (!needs_ida_export(input)) {
         return input;
@@ -1147,8 +1161,7 @@ std::filesystem::path ensure_sqlite_input(
     std::filesystem::path output;
     if (!export_dir.empty()) {
         std::filesystem::create_directories(export_dir);
-        output = export_dir / input.filename();
-        output.replace_extension(".sqlite");
+        output = export_dir / (input.stem().string() + name_suffix + ".sqlite");
     }
     return export_via_ida(input, output, options);
 }
@@ -1297,8 +1310,18 @@ int cmd_diff_pipeline(int argc, char** argv)
         return 2;
     }
 
-    const auto main_db = ensure_sqlite_input(primary_input, export_dir, export_options);
-    const auto diff_db = ensure_sqlite_input(secondary_input, export_dir, export_options);
+    // Two inputs from different directories may share a filename; the
+    // exports must not overwrite each other.
+    std::string primary_suffix;
+    std::string secondary_suffix;
+    if (needs_ida_export(primary_input) && needs_ida_export(secondary_input)
+        && primary_input.stem() == secondary_input.stem()) {
+        primary_suffix = ".primary";
+        secondary_suffix = ".secondary";
+    }
+
+    const auto main_db = ensure_sqlite_input(primary_input, export_dir, export_options, primary_suffix);
+    const auto diff_db = ensure_sqlite_input(secondary_input, export_dir, export_options, secondary_suffix);
     return run_diff_session_cli(main_db, diff_db, out_db, diff_options, progress);
 }
 
