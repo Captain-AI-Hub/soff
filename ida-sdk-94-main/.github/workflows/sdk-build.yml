@@ -1,0 +1,116 @@
+name: SDK Build (reusable)
+
+# Build all C++ SDK components against the shipped stub libs in src/lib/ on
+# every platform, then upload bin/ per platform. Qt-based samples (qwindow,
+# qproject) are built only if a Qt6 is discoverable; otherwise skipped silently.
+#
+# The `docs` job (Doxygen HTML) is a sibling here because it documents this
+# SDK; it only reads src/include/, so it runs independently of the build.
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows, os: windows-latest }
+          - { platform: linux,   os: ubuntu-latest }
+          - { platform: macos,   os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Visual Studio Developer Environment
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Install build dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build
+
+    - name: Install build dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: brew install cmake ninja
+
+    # Ninja on all platforms: a single-config generator bakes in the build type
+    # (CMAKE_BUILD_TYPE defaults to Release) and writes outputs straight into
+    # bin/plugins, bin/procs, etc. The multi-config Visual Studio generator
+    # would instead nest a per-config Release/ subfolder, which breaks the stats
+    # and idapython steps. On Windows, msvc-dev-cmd provides cl.exe in the
+    # environment (find_msvc.cmake is the fallback) and ninja is preinstalled.
+    - name: Configure CMake
+      working-directory: src
+      run: cmake -B build -G Ninja
+
+    - name: Build SDK (all components)
+      working-directory: src
+      run: cmake --build build --parallel
+
+    - name: Build Statistics
+      working-directory: src
+      shell: bash
+      run: |
+        case "$RUNNER_OS" in
+          Windows) ext=dll ;;
+          macOS)   ext=dylib ;;
+          *)       ext=so ;;
+        esac
+        echo "=== Build Results ==="
+        echo "Plugins built: $(ls -1 bin/plugins/*.$ext 2>/dev/null | wc -l)"
+        echo "Loaders built: $(ls -1 bin/loaders/*.$ext 2>/dev/null | wc -l)"
+        echo "Processors built: $(ls -1 bin/procs/*.$ext 2>/dev/null | wc -l)"
+        echo ""
+        echo "=== Qt Plugin Status ==="
+        for q in qproject qwindow; do
+          if [ -f "bin/plugins/$q.$ext" ]; then
+            echo "[OK] $q.$ext built successfully"
+          else
+            echo "[SKIP] $q.$ext not built (Qt6 not available)"
+          fi
+        done
+
+    - name: Upload SDK build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-build-${{ matrix.platform }}
+        path: |
+          src/bin/
+        retention-days: 7
+
+  # SDK HTML documentation (Doxygen). Reads src/include/ only, so no build.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Doxygen
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y doxygen
+
+    # Doxyfile has OUTPUT_DIRECTORY = build/ (relative), so this writes to
+    # docs/build/html/. WARN_AS_ERROR is off, so the usual cross-reference
+    # warnings do not fail the job; a genuine Doxygen error still does.
+    - name: Generate SDK HTML documentation
+      working-directory: docs
+      run: doxygen Doxyfile
+
+    - name: Verify documentation was generated
+      run: test -f docs/build/html/index.html
+
+    - name: Upload SDK docs artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-docs-html
+        path: docs/build/html/
+        retention-days: 7
