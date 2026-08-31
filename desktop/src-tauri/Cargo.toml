@@ -1,6 +1,6 @@
 [package]
 name = "soff-desktop"
-version = "0.3.4"
+version = "0.3.5"
 description = "Soff Binary Diff Desktop"
 authors = ["you"]
 edition = "2021"

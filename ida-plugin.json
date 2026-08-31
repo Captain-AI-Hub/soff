@@ -7,6 +7,6 @@
     "logoPath": "docs/architecture.svg",
     "idaVersions": "9.3",
     "description": "C++ rewrite skeleton for a Diaphora-like IDA diffing plugin.",
-    "version": "0.3.4"
+    "version": "0.3.5"
   }
 }

@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "soff-desktop"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "actix-web",
  "libloading 0.8.9",
