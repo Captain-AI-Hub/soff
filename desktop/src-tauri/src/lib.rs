@@ -243,7 +243,9 @@ struct SoffDiffOptions {
 
 type SoffProgressFn = extern "C" fn(*const c_char, *mut c_void);
 
-fn find_soff_ffi_path(resource_dir: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+fn find_soff_ffi_path(
+    resource_dir: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
     let exe_dir = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
