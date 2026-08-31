@@ -172,12 +172,15 @@ std::size_t find_same_name(
     double min_ratio,
     bool same_processor,
     const FunctionCache* primary_cache,
-    const FunctionCache* secondary_cache)
+    const FunctionCache* secondary_cache,
+    const FunctionTextResolver* primary_texts,
+    const FunctionTextResolver* secondary_texts)
 {
     constexpr double bonus_ratio = 0.01;
     std::size_t added = 0;
 
-    if (primary_cache != nullptr && secondary_cache != nullptr) {
+    if (primary_cache != nullptr && secondary_cache != nullptr
+        && primary_texts != nullptr && secondary_texts != nullptr) {
         soff::perf::add_counter("propagation.same_name.cache_path");
         const auto add_cached_pair = [&](
                                          const std::vector<Address>& primary_addresses,
@@ -199,11 +202,13 @@ std::size_t find_same_name(
                 return;
             }
 
+            const auto& primary_text = primary_texts->get(primary_address);
+            const auto& secondary_text = secondary_texts->get(secondary_address);
             double ratio = propagation_text_ratio(
-                primary_func->second.clean_assembly,
-                secondary_func->second.clean_assembly,
-                primary_func->second.clean_pseudo,
-                secondary_func->second.clean_pseudo,
+                primary_text.clean_assembly,
+                secondary_text.clean_assembly,
+                primary_text.clean_pseudo,
+                secondary_text.clean_pseudo,
                 same_processor);
             if (ratio < min_ratio) return;
             if (ratio < 1.0 && ratio + bonus_ratio < 1.0) ratio += bonus_ratio;
@@ -781,7 +786,8 @@ PropagationStats run_propagation(
     stats.same_name_matches = find_same_name(
         database, matches, matched_primary, matched_secondary,
         options.same_name_min_ratio, options.same_processor,
-        options.primary_cache, options.secondary_cache);
+        options.primary_cache, options.secondary_cache,
+        options.primary_texts, options.secondary_texts);
 
     for (int iter = 0; iter < options.max_iterations; ++iter) {
         std::size_t round_added = 0;

@@ -107,8 +107,10 @@ std::string function_count_sql(const std::string& prefix)
 
 std::string function_select_sql(const std::string& prefix)
 {
+    // Large text columns (clean_assembly/clean_pseudo) are intentionally not
+    // cached; FunctionTextResolver fetches them lazily for the few functions
+    // that actually need them.
     return "select coalesce(address, ''), coalesce(name, ''), coalesce(mangled_function, ''), "
-           "coalesce(clean_assembly, ''), coalesce(clean_pseudo, ''), "
            "coalesce(pseudocode_primes, ''), coalesce(bytes_hash, ''), "
            "coalesce(md_index, ''), coalesce(constants, ''), coalesce(source_file, ''), "
            "coalesce(nodes, ''), coalesce(edges, ''), coalesce(instructions, ''), "
@@ -139,18 +141,16 @@ FunctionCache load_function_cache(db::Database& database, std::string_view schem
         function.address = parse_address_or_zero(statement.column_text(0));
         function.name = statement.column_text(1);
         function.mangled_function = statement.column_text(2);
-        function.clean_assembly = statement.column_text(3);
-        function.clean_pseudo = statement.column_text(4);
-        function.pseudocode_primes = statement.column_text(5);
-        function.bytes_hash = statement.column_text(6);
-        function.md_index = statement.column_text(7);
-        function.constants = statement.column_text(8);
-        function.source_file = statement.column_text(9);
-        function.nodes = parse_int_or_zero(statement.column_text(10));
-        function.edges = parse_int_or_zero(statement.column_text(11));
-        function.instructions = parse_int_or_zero(statement.column_text(12));
-        function.size = parse_int_or_zero(statement.column_text(13));
-        function.constants_count = parse_int_or_zero(statement.column_text(14));
+        function.pseudocode_primes = statement.column_text(3);
+        function.bytes_hash = statement.column_text(4);
+        function.md_index = statement.column_text(5);
+        function.constants = statement.column_text(6);
+        function.source_file = statement.column_text(7);
+        function.nodes = parse_int_or_zero(statement.column_text(8));
+        function.edges = parse_int_or_zero(statement.column_text(9));
+        function.instructions = parse_int_or_zero(statement.column_text(10));
+        function.size = parse_int_or_zero(statement.column_text(11));
+        function.constants_count = parse_int_or_zero(statement.column_text(12));
 
         const auto address = function.address;
         const auto name = function.name;

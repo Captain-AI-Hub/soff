@@ -327,18 +327,22 @@ std::vector<db::HeuristicStat> convert_stats(const std::vector<SqlHeuristicStats
 
 // Ratio between two unmatched functions for the fast-path remaining pass.
 double remaining_pair_ratio(
-    const CachedFunction& primary,
-    const CachedFunction& secondary,
+    Address primary,
+    Address secondary,
+    const FunctionTextResolver& primary_texts,
+    const FunctionTextResolver& secondary_texts,
     bool same_processor)
 {
+    const auto& primary_text = primary_texts.get(primary);
+    const auto& secondary_text = secondary_texts.get(secondary);
     return same_processor
         ? candidate_text_ratio(
             "", "", "", "",
-            primary.clean_assembly, secondary.clean_assembly,
-            primary.clean_pseudo, secondary.clean_pseudo)
+            primary_text.clean_assembly, secondary_text.clean_assembly,
+            primary_text.clean_pseudo, secondary_text.clean_pseudo)
         : candidate_text_ratio(
             "", "", "", "",
-            "", "", primary.clean_pseudo, secondary.clean_pseudo);
+            "", "", primary_text.clean_pseudo, secondary_text.clean_pseudo);
 }
 
 // The stripped/patchdiff fast paths skip the SQL heuristics, which would
@@ -349,6 +353,8 @@ double remaining_pair_ratio(
 std::size_t match_remaining_after_fast_path(
     const FunctionCache& primary_cache,
     const FunctionCache& secondary_cache,
+    const FunctionTextResolver& primary_texts,
+    const FunctionTextResolver& secondary_texts,
     boost::unordered_flat_set<Address>& matched_primary,
     boost::unordered_flat_set<Address>& matched_secondary,
     std::vector<db::ResultMatch>& matches,
@@ -414,7 +420,9 @@ std::size_t match_remaining_after_fast_path(
                 continue;
             }
             const auto* secondary = found->second;
-            const double ratio = remaining_pair_ratio(*primary, *secondary, same_processor);
+            const double ratio = remaining_pair_ratio(
+                primary->address, secondary->address,
+                primary_texts, secondary_texts, same_processor);
             if (ratio < config.default_partial_ratio) {
                 continue;
             }
@@ -447,7 +455,9 @@ std::size_t match_remaining_after_fast_path(
             if (secondary->nodes < 3) {
                 continue;
             }
-            const double ratio = remaining_pair_ratio(*primary, *secondary, same_processor);
+            const double ratio = remaining_pair_ratio(
+                primary->address, secondary->address,
+                primary_texts, secondary_texts, same_processor);
             if (ratio < config.speedup_patch_diff_renamed_function_min_ratio) {
                 continue;
             }
@@ -613,6 +623,8 @@ DiffSessionSummary run_session(
 
     auto primary_cache = load_function_cache(database, "main");
     auto secondary_cache = load_function_cache(database, "diff");
+    FunctionTextResolver primary_texts(database, "main");
+    FunctionTextResolver secondary_texts(database, "diff");
 
     auto sql_options = options.sql;
     sql_options.primary_cache = &primary_cache;
@@ -702,7 +714,7 @@ DiffSessionSummary run_session(
     if (!exact_only && !is_stripped_fast_path) {
         find_same_name(database, pre_same_name_matches, pre_matched_p, pre_matched_s,
             options.propagation.same_name_min_ratio, sql_options.same_processor,
-            &primary_cache, &secondary_cache);
+            &primary_cache, &secondary_cache, &primary_texts, &secondary_texts);
         for (const auto& m : pre_same_name_matches) {
             sql_options.pre_matched_primary.insert(m.primary);
             sql_options.pre_matched_secondary.insert(m.secondary);
@@ -773,6 +785,8 @@ DiffSessionSummary run_session(
         const auto added = match_remaining_after_fast_path(
             primary_cache,
             secondary_cache,
+            primary_texts,
+            secondary_texts,
             matched_primary,
             matched_secondary,
             results.matches,
@@ -796,6 +810,8 @@ DiffSessionSummary run_session(
         prop_options.enable_slow = sql_options.enable_slow;
         prop_options.primary_cache = &primary_cache;
         prop_options.secondary_cache = &secondary_cache;
+        prop_options.primary_texts = &primary_texts;
+        prop_options.secondary_texts = &secondary_texts;
         const auto round_stats = run_propagation(
             database, results.matches,
             matched_primary, matched_secondary, prop_options);

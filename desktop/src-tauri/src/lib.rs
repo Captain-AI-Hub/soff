@@ -243,7 +243,7 @@ struct SoffDiffOptions {
 
 type SoffProgressFn = extern "C" fn(*const c_char, *mut c_void);
 
-fn find_soff_ffi_path() -> Result<std::path::PathBuf, String> {
+fn find_soff_ffi_path(resource_dir: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
     let exe_dir = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
@@ -268,6 +268,16 @@ fn find_soff_ffi_path() -> Result<std::path::PathBuf, String> {
         return Ok(resources);
     }
 
+    // Installed layouts (deb/rpm/dmg/nsis): Tauri puts bundled resources in
+    // the app resource dir (e.g. /usr/lib/soff-desktop/), not next to the exe.
+    if let Some(dir) = resource_dir {
+        for candidate in [dir.join(name), dir.join("resources").join(name)] {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
     // Dev: xmake build output
     let dev_candidates = [
         exe_dir
@@ -289,7 +299,11 @@ fn find_soff_ffi_path() -> Result<std::path::PathBuf, String> {
         }
     }
 
-    Err(format!("{} not found near {}", name, exe_dir.display()))
+    Err(format!(
+        "{} not found near {} or in the app resource directory",
+        name,
+        exe_dir.display()
+    ))
 }
 
 struct ChannelUserdata {
@@ -309,6 +323,7 @@ extern "C" fn progress_callback(json_line: *const c_char, userdata: *mut c_void)
 
 #[tauri::command]
 async fn run_diff(
+    app: tauri::AppHandle,
     primary_db: String,
     secondary_db: String,
     output_path: String,
@@ -316,7 +331,11 @@ async fn run_diff(
     unreliable: bool,
     channel: tauri::ipc::Channel<String>,
 ) -> Result<String, String> {
-    let lib_path = find_soff_ffi_path()?;
+    let resource_dir = {
+        use tauri::Manager;
+        app.path().resource_dir().ok()
+    };
+    let lib_path = find_soff_ffi_path(resource_dir.as_deref())?;
     let output = output_path.clone();
 
     tauri::async_runtime::spawn_blocking(move || unsafe {

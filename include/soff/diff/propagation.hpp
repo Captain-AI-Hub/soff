@@ -25,6 +25,8 @@ struct PropagationOptions
     bool same_processor = true;
     const FunctionCache* primary_cache = nullptr;
     const FunctionCache* secondary_cache = nullptr;
+    const FunctionTextResolver* primary_texts = nullptr;
+    const FunctionTextResolver* secondary_texts = nullptr;
 };
 
 struct PropagationStats
@@ -53,7 +55,9 @@ std::size_t find_same_name(
     double min_ratio,
     bool same_processor,
     const FunctionCache* primary_cache = nullptr,
-    const FunctionCache* secondary_cache = nullptr);
+    const FunctionCache* secondary_cache = nullptr,
+    const FunctionTextResolver* primary_texts = nullptr,
+    const FunctionTextResolver* secondary_texts = nullptr);
 
 std::size_t find_locally_affine_functions(
     db::Database& database,

@@ -78,6 +78,8 @@ void test_propagation_regressions()
     const auto secondary_cache = soff::diff::load_function_cache(database, "diff");
     assert(primary_cache.by_name.at("duplicate_name").size() == 2);
     assert(secondary_cache.by_name.at("duplicate_name").size() == 2);
+    soff::diff::FunctionTextResolver primary_texts(database, "main");
+    soff::diff::FunctionTextResolver secondary_texts(database, "diff");
 
     std::vector<soff::db::ResultMatch> matches;
     boost::unordered_flat_set<soff::Address> matched_primary;
@@ -90,7 +92,9 @@ void test_propagation_regressions()
         0.9,
         true,
         &primary_cache,
-        &secondary_cache);
+        &secondary_cache,
+        &primary_texts,
+        &secondary_texts);
 
     assert(added == 2);
     assert(matches.size() == 2);
