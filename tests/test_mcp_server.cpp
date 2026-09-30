@@ -78,10 +78,25 @@ bool contains(const std::string& haystack, const std::string& needle)
     return haystack.find(needle) != std::string::npos;
 }
 
+// Paths embedded in request JSON (and expected inside response JSON) must be
+// escaped: Windows paths contain backslashes, which are invalid raw in JSON.
+std::string json_escape(const std::string& value)
+{
+    std::string out;
+    out.reserve(value.size());
+    for (const char ch : value) {
+        if (ch == '"' || ch == '\\') {
+            out.push_back('\\');
+        }
+        out.push_back(ch);
+    }
+    return out;
+}
+
 std::string call_tool(const std::string& result_path, const std::string& tool, const std::string& extra_args)
 {
     const auto message = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\""
-        + tool + "\",\"arguments\":{\"result_path\":\"" + result_path + "\"" + extra_args + "}}}";
+        + tool + "\",\"arguments\":{\"result_path\":\"" + json_escape(result_path) + "\"" + extra_args + "}}}";
     const auto response = soff::cli::handle_mcp_message(message);
     assert(response.has_value());
     return *response;
@@ -203,7 +218,7 @@ void test_mcp_server()
         assert(contains(response, "\"primary_name\":\"start\""));
         assert(contains(response, "\"ratio\":0.9"));
         assert(contains(response, "\"nodes1\":3"));
-        assert(contains(response, main_db.string()));
+        assert(contains(response, json_escape(main_db.string())));
         assert(!contains(response, "\"isError\":true"));
         std::cout << "mcp: soff_diff_results passed\n";
     }
