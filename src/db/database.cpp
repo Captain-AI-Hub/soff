@@ -21,6 +21,7 @@ namespace {
 constexpr int sqlite_ok = 0;
 constexpr int sqlite_row = 100;
 constexpr int sqlite_done = 101;
+constexpr int sqlite_open_readonly = 0x00000001;
 constexpr int sqlite_open_readwrite = 0x00000002;
 constexpr int sqlite_open_create = 0x00000004;
 
@@ -351,14 +352,20 @@ Database& Database::operator=(Database&& other) noexcept
 
 void Database::open(const std::filesystem::path& path)
 {
+    open_with_flags(path, sqlite_open_readwrite | sqlite_open_create);
+}
+
+void Database::open_read_only(const std::filesystem::path& path)
+{
+    open_with_flags(path, sqlite_open_readonly);
+}
+
+void Database::open_with_flags(const std::filesystem::path& path, int flags)
+{
     close();
     const auto filename = path_string(path);
     sqlite3* db = nullptr;
-    const int rc = impl_->api->open_v2(
-        filename.c_str(),
-        &db,
-        sqlite_open_readwrite | sqlite_open_create,
-        nullptr);
+    const int rc = impl_->api->open_v2(filename.c_str(), &db, flags, nullptr);
     if (rc != sqlite_ok) {
         std::string message = db_error(*impl_->api, db, "failed to open SQLite database");
         if (db != nullptr) {

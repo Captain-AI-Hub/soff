@@ -37,7 +37,8 @@ target("soff_cli")
 target("soff_smoke")
     set_kind("binary")
     add_deps("soff_core")
-    add_files("tests/*.cpp")
+    -- tests/test_mcp_server.cpp drives the MCP server handler directly.
+    add_files("tests/*.cpp", "src/cli/mcp_server.cpp")
 
 target("soff_ffi")
     set_kind("shared")

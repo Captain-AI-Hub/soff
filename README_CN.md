@@ -11,7 +11,7 @@
 | `soff.dll` / `.so` / `.dylib` | IDA Pro 插件 (IDA 9.0+) |
 | `soff_cli` | 命令行差异工具 |
 | `soff-desktop` | 独立结果查看器 (Tauri 应用) |
-| `soff-mcp` | 由桌面应用启动的本地 Model Context Protocol 服务 |
+| `soff-mcp` | Model Context Protocol 服务：`soff_cli mcp` 提供 stdio 版，桌面应用可启动 HTTP 版 |
 
 ## 安装
 
@@ -109,6 +109,9 @@ soff_cli diff-db primary.sqlite secondary.sqlite --out results.soff
 
 # 查看摘要
 soff_cli inspect-db results.soff
+
+# 以 stdio 方式启动 MCP 服务（换行分隔的 JSON-RPC 2.0）
+soff_cli mcp
 ```
 
 无头导出选项：`--no-decompiler`、`--microcode`、
@@ -120,13 +123,8 @@ soff_cli inspect-db results.soff
 
 ### MCP 服务
 
-桌面应用可以启动本地 Soff MCP 服务，用于智能体工作流。默认监听地址：
-
-```text
-http://127.0.0.1:11339/mcp/
-```
-
-MCP 服务以结构化方式暴露 `.soff` 结果和源数据库信息，提供以下工具：
+Soff 提供 MCP（Model Context Protocol）服务，以只读工具的方式向智能体暴露 `.soff`
+结果和源数据库信息：
 
 | 工具 | 说明 |
 |------|------|
@@ -135,7 +133,36 @@ MCP 服务以结构化方式暴露 `.soff` 结果和源数据库信息，提供�
 | `soff_diff_asm` | 为匹配函数对生成 unified 汇编 diff |
 | `soff_diff_pseudo` | 为匹配函数对生成 unified 伪代码 diff |
 
-当 MCP 客户端、智能体助手或自动化工具需要读取二进制差异结果时，可以直接使用该服务，无需从桌面 UI 中提取数据。
+**命令行（stdio）** —— 直接在命令行启动：
+
+```
+soff_cli mcp
+```
+
+进程在 stdin/stdout 上收发换行分隔的 JSON-RPC 2.0 消息，即 stdio MCP 客户端
+所要求的传输方式。在支持 MCP 的助手中按可执行文件注册即可，例如
+ZCode / Claude Desktop / Cursor：
+
+```json
+{
+  "mcpServers": {
+    "soff": {
+      "command": "/path/to/soff_cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**桌面应用（HTTP）** —— 桌面应用也可以启动本地 Streamable HTTP 服务，
+默认监听地址：
+
+```text
+http://127.0.0.1:11339/mcp/
+```
+
+两个入口暴露的工具完全一致，智能体无需读取桌面 UI 即可查询匹配函数、
+未匹配函数以及汇编/伪代码差异。
 
 ## IDA Chooser 字段说明
 

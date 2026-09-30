@@ -13,6 +13,7 @@ soff/
 ├── src/
 │   ├── analysis/model.cpp    Snapshot validation
 │   ├── cli/main.cpp          soff_cli binary (export/diff i64 pipelines, diff-db, inspect tools)
+│   ├── cli/mcp_server.cpp    stdio MCP server (`soff mcp`: .soff query tools, parity with desktop)
 │   ├── core/version.cpp      Version string
 │   ├── db/
 │   │   ├── database.cpp      SQLite wrapper (open, execute, query)

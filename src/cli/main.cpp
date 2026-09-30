@@ -1,3 +1,4 @@
+#include "soff/cli/mcp_server.hpp"
 #include "soff/core/version.hpp"
 #include "soff/db/database.hpp"
 #include "soff/db/result_repository.hpp"
@@ -75,7 +76,10 @@ void print_usage()
            "             [--unreliable] [--experimental] [--no-slow] [--relaxed] [--progress]\n"
            "             [--ml-model <model.json>] [--max-rows <n>] [--timeout <seconds>]\n"
         << "  soff_cli ml-export <result.soff> <main.sqlite> <diff.sqlite> --out <file.csv|.json>\n"
-        << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>] [--root <fixture-root>]\n";
+        << "  soff_cli check-m5-fixture <fixture.json> [--out <result.soff>] [--root <fixture-root>]\n"
+        << "  soff_cli mcp\n"
+        << "             (serve read-only .soff diff query tools over the Model Context Protocol on stdio;\n"
+        << "              speak newline-delimited JSON-RPC 2.0 to this process, e.g. from an MCP client)\n";
 }
 
 bool parse_diff_options(int argc, char** argv, std::filesystem::path& output, soff::diff::DiffSessionOptions& options, bool& progress)
@@ -1647,6 +1651,14 @@ int main(int argc, char** argv)
                 }
             }
             return 0;
+        }
+
+        if (command == "mcp") {
+            if (argc != 2) {
+                print_usage();
+                return 2;
+            }
+            return soff::cli::run_mcp_server();
         }
 
         if (command == "check-m5-fixture") {

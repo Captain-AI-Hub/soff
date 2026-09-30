@@ -71,6 +71,7 @@ public:
     Database& operator=(Database&& other) noexcept;
 
     void open(const std::filesystem::path& path);
+    void open_read_only(const std::filesystem::path& path);
     void close() noexcept;
 
     bool is_open() const noexcept;
@@ -89,6 +90,8 @@ public:
 
 private:
     friend class Statement;
+
+    void open_with_flags(const std::filesystem::path& path, int flags);
 
     struct Impl;
     Impl* impl_ = nullptr;

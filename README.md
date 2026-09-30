@@ -13,7 +13,7 @@ High-performance binary diff engine for IDA Pro. Exports function features from 
 | `soff.dll` / `.so` / `.dylib` | IDA Pro plugin (IDA 9.0+) |
 | `soff_cli` | Command-line diff tool |
 | `soff-desktop` | Standalone result viewer (Tauri app) |
-| `soff-mcp` | Local Model Context Protocol server launched from the desktop app |
+| `soff-mcp` | Model Context Protocol server: stdio via `soff_cli mcp`, or HTTP launched from the desktop app |
 
 ## Installation
 
@@ -111,6 +111,9 @@ soff_cli diff-db primary.sqlite secondary.sqlite --out results.soff
 
 # View summary
 soff_cli inspect-db results.soff
+
+# Serve MCP tools over stdio (newline-delimited JSON-RPC 2.0)
+soff_cli mcp
 ```
 
 Headless export options: `--no-decompiler`, `--microcode`,
@@ -123,15 +126,8 @@ which is what you want for large databases.
 
 ### MCP Server
 
-The desktop app can start a local Soff MCP server for agentic workflows. By
-default it listens on:
-
-```text
-http://127.0.0.1:11339/mcp/
-```
-
-The MCP server exposes `.soff` result data and source database details through
-tools for:
+Soff ships MCP (Model Context Protocol) servers that expose `.soff` result data
+and source database details to agentic tools through four read-only tools:
 
 | Tool | Description |
 |------|-------------|
@@ -140,8 +136,36 @@ tools for:
 | `soff_diff_asm` | Generate a unified assembly diff for a matched function pair |
 | `soff_diff_pseudo` | Generate a unified pseudocode diff for a matched function pair |
 
-Use this when an MCP-capable assistant or automation tool needs structured
-access to binary diff results without scraping the desktop UI.
+**CLI (stdio)** — run the server directly from the command line:
+
+```
+soff_cli mcp
+```
+
+It speaks newline-delimited JSON-RPC 2.0 on stdin/stdout, which is what stdio
+MCP clients expect. Register it with an MCP-capable assistant by pointing it at
+the `soff_cli` executable, e.g. for ZCode / Claude Desktop / Cursor:
+
+```json
+{
+  "mcpServers": {
+    "soff": {
+      "command": "/path/to/soff_cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Desktop (HTTP)** — the desktop app can also start a local Streamable HTTP
+server for agentic workflows. By default it listens on:
+
+```text
+http://127.0.0.1:11339/mcp/
+```
+
+Both servers expose the same tools, so agents can query matches, unmatched
+functions, and assembly/pseudocode diffs without scraping the desktop UI.
 
 ## IDA Chooser Fields
 

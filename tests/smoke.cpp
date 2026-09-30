@@ -1047,5 +1047,8 @@ int main(int argc, char** argv)
     extern void test_line_diff();
     test_line_diff();
 
+    extern void test_mcp_server();
+    test_mcp_server();
+
     return 0;
 }
