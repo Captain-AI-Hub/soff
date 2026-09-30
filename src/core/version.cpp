@@ -4,7 +4,7 @@ namespace soff {
 
 std::string_view version()
 {
-    return "0.3.5";
+    return "0.4.0";
 }
 
 std::string_view product_name()
